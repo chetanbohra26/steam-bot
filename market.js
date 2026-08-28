@@ -187,4 +187,4 @@ async function cancelBuyOrder(buy_orderid) {
 	}
 }
 
-module.exports = { getPriceOverview, createBuyOrder, getMyBuyOrderIds, cancelBuyOrder };
+module.exports = { getPriceOverview, createBuyOrder, getMyBuyOrderIds, cancelBuyOrder, getSession, httpsRequest };
