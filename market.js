@@ -2,25 +2,26 @@ const https = require('https');
 const zlib = require('zlib');
 const { getCookies } = require('./auth');
 
-function getPriceOverview(appid, market_hash_name) {
+async function getPriceOverview(appid, market_hash_name, attempt = 1) {
 	const currency = process.env.CURRENCY || 1;
-	const url = `https://steamcommunity.com/market/priceoverview/?appid=${appid}&market_hash_name=${encodeURIComponent(market_hash_name)}&currency=${currency}`;
+	const path = `/market/priceoverview/?appid=${appid}&market_hash_name=${encodeURIComponent(market_hash_name)}&currency=${currency}`;
+	const { body } = await httpsRequest({ hostname: 'steamcommunity.com', path, method: 'GET' });
+	const data = JSON.parse(body);
 
-	return new Promise((resolve, reject) => {
-		https
-			.get(url, (res) => {
-				let data = '';
-				res.on('data', (chunk) => (data += chunk));
-				res.on('end', () => {
-					try {
-						resolve(JSON.parse(data));
-					} catch (err) {
-						reject(err);
-					}
-				});
-			})
-			.on('error', reject);
-	});
+	// Steam returns a literal "null" body (parses to JS null) when priceoverview is
+	// rate-limited, rather than a proper error object. Back off and retry instead of
+	// handing callers a null they'd crash trying to read .success off.
+	if (data === null) {
+		const MAX_ATTEMPTS = 4;
+		if (attempt >= MAX_ATTEMPTS) {
+			throw new Error(`priceoverview rate-limited for ${market_hash_name} after ${attempt} attempts`);
+		}
+		const backoffMs = 30000 * attempt; // 30s, 60s, 90s
+		await new Promise((resolve) => setTimeout(resolve, backoffMs));
+		return getPriceOverview(appid, market_hash_name, attempt + 1);
+	}
+
+	return data;
 }
 
 function getSession() {

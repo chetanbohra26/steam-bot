@@ -1,6 +1,13 @@
 const { login, community } = require('./auth');
 const { getPriceOverview, createBuyOrder } = require('./market');
-const items = require('./items.json');
+const allItems = require('./items.json');
+
+const LIMIT = 200;
+
+// items.json is a broader liquidity-sorted pool (currently up to 1000); each run only
+// places orders for the LIMIT cheapest ones (by the price_paise snapshot taken at pick
+// time), so capital goes toward the most affordable/highest-count-of-shots opportunities.
+const items = [...allItems].sort((a, b) => (a.price_paise ?? Infinity) - (b.price_paise ?? Infinity)).slice(0, LIMIT);
 
 async function processItem(item) {
 	const data = await getPriceOverview(item.appid, item.market_hash_name);
@@ -34,6 +41,7 @@ async function processItem(item) {
 
 async function startBot() {
 	await login();
+	console.log(`Pool: ${allItems.length} item(s). Processing the ${items.length} cheapest.`);
 	for (let i = 0; i < items.length; i++) {
 		const item = items[i];
 		console.log(`\n[${i + 1}/${items.length}]`);
@@ -42,6 +50,7 @@ async function startBot() {
 		} catch (err) {
 			console.error(`  Failed: ${err.message}`);
 		}
+		await new Promise((resolve) => setTimeout(resolve, 1000)); // pace requests between items
 	}
 	console.log(`\nDone — processed ${items.length} item(s).`);
 }
