@@ -5,7 +5,10 @@
 	"main": "index.js",
 	"scripts": {
 		"start": "node index.js",
-		"dev": "node --watch index.js"
+		"dev": "node --watch index.js",
+		"up": "node index.js",
+		"down": "node cancelAllBuyOrders.js",
+		"cancel-orders": "node cancelAllBuyOrders.js"
 	},
 	"dependencies": {
 		"steamcommunity": "^3.50.0",
