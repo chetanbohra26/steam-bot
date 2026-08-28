@@ -5,7 +5,11 @@ const fs = require('fs');
 const APPID = 730; // Counter-Strike 2
 const PAGE_SIZE = 100;
 const PAGES_TO_SCAN = 40; // scans the 4000 most-liquid commodity items
-const MIN_PRICE_PAISE = 10000; // ₹100.00 — sell_price is in paise; rough floor so a 70% lowball fill is still worth something
+const MIN_PRICE_PAISE = 4000; // ₹40.00 — sell_price is in paise; rough floor so a 70% lowball fill is still worth something
+// Matches asset_description.type strings for guns, e.g. "Mil-Spec Grade Rifle", "Restricted Pistol",
+// "Covert Sniper Rifle" — excludes knives/gloves ("Covert Knife", "Extraordinary Gloves") and
+// non-weapon items (cases, stickers, agents, etc).
+const WEAPON_TYPE_PATTERN = /(Pistol|SMG|Rifle|Shotgun|Machine ?Gun)$/i;
 const TARGET_COUNT = 10;
 
 async function fetchPage(cookieString, start) {
@@ -37,7 +41,7 @@ async function main() {
 		}
 
 		for (const r of data.results) {
-			if (r.asset_description?.commodity !== 1) continue; // skip non-commodity (one-of-a-kind) items
+			if (!WEAPON_TYPE_PATTERN.test(r.asset_description?.type || '')) continue; // weapon skins only
 			const price = Number(r.sell_price);
 			if (!Number.isFinite(price) || price < MIN_PRICE_PAISE) continue; // Number() on undefined/garbage -> NaN, explicitly excluded rather than silently passing
 			candidates.push({
