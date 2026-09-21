@@ -37,7 +37,10 @@ async function login() {
 	}
 
 	const username = process.env.STEAM_USERNAME;
-	const password = process.env.STEAM_PASSWORD;
+	// STEAM_PASSWORD is stored base64-encoded in .env, not plaintext — decode at runtime.
+	// Note: this is obfuscation, not encryption; anyone who can read .env can trivially
+	// decode it. It just avoids the literal password sitting as plaintext in the file.
+	const password = Buffer.from(process.env.STEAM_PASSWORD || '', 'base64').toString('utf8');
 
 	const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 	const twoFactorCode = await new Promise((resolve) => {
