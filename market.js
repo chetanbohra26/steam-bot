@@ -2,23 +2,19 @@ const https = require('https');
 const zlib = require('zlib');
 const { getCookies } = require('./auth');
 
-async function getPriceOverview(appid, market_hash_name, attempt = 1) {
+async function getPriceOverview(appid, market_hash_name) {
 	const currency = process.env.CURRENCY || 1;
 	const path = `/market/priceoverview/?appid=${appid}&market_hash_name=${encodeURIComponent(market_hash_name)}&currency=${currency}`;
 	const { body } = await httpsRequest({ hostname: 'steamcommunity.com', path, method: 'GET' });
 	const data = JSON.parse(body);
 
 	// Steam returns a literal "null" body (parses to JS null) when priceoverview is
-	// rate-limited, rather than a proper error object. Back off and retry instead of
-	// handing callers a null they'd crash trying to read .success off.
+	// rate-limited, rather than a proper error object. Valve's rate-limit ban here is
+	// IP-based, lasts hours, and — critically — extends further if you keep hitting the
+	// endpoint while still banned. So: fail fast, no in-process retry. A retry loop here
+	// would just add more violations seconds after the last one and keep the ban alive.
 	if (data === null) {
-		const MAX_ATTEMPTS = 4;
-		if (attempt >= MAX_ATTEMPTS) {
-			throw new Error(`priceoverview rate-limited for ${market_hash_name} after ${attempt} attempts`);
-		}
-		const backoffMs = 30000 * attempt; // 30s, 60s, 90s
-		await new Promise((resolve) => setTimeout(resolve, backoffMs));
-		return getPriceOverview(appid, market_hash_name, attempt + 1);
+		throw new Error(`priceoverview rate-limited for ${market_hash_name} — do not retry immediately, wait hours`);
 	}
 
 	return data;

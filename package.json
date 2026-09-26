@@ -9,7 +9,8 @@
 		"up": "node index.js",
 		"down": "node cancelAllBuyOrders.js",
 		"cancel-orders": "node cancelAllBuyOrders.js",
-		"pick-items": "node selectPilotItems.js"
+		"pick-items": "node selectPilotItems.js",
+		"dry-run": "node dryRunUp.js"
 	},
 	"dependencies": {
 		"steamcommunity": "^3.50.0",

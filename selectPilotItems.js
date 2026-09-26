@@ -13,7 +13,7 @@ const WEAPON_TYPE_PATTERN = /(Pistol|SMG|Rifle|Shotgun|Machine ?Gun)$/i;
 
 const STAGE1_CANDIDATE_COUNT = 2000; // broad pool gathered cheaply by listing count, before real-demand ranking
 const TARGET_COUNT = 1000; // final pool size after ranking by real trade volume
-const PRICEOVERVIEW_DELAY_MS = 1000; // pace between per-item priceoverview calls in stage 2
+const PRICEOVERVIEW_DELAY_MS = 4500; // pace between per-item priceoverview calls in stage 2 — Steam's limit is ~20/min per IP (community-reported), this keeps us under ~13/min for margin
 
 // Caches stage 1's candidate list and stage 2's resolved (volume-checked) results across
 // runs, so a rate-limit hit doesn't force starting over from zero — a retry only queries

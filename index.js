@@ -50,7 +50,7 @@ async function startBot() {
 		} catch (err) {
 			console.error(`  Failed: ${err.message}`);
 		}
-		await new Promise((resolve) => setTimeout(resolve, 1000)); // pace requests between items
+		await new Promise((resolve) => setTimeout(resolve, 4500)); // pace requests between items — Steam's priceoverview limit is ~20/min per IP (community-reported), this keeps us under ~13/min for margin
 	}
 	console.log(`\nDone — processed ${items.length} item(s).`);
 }
