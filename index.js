@@ -3,7 +3,7 @@ const { login, community } = require('./auth');
 const { getPriceOverview, createBuyOrder } = require('./market');
 const allItems = require('./items.json');
 
-const LIMIT = 200;
+const LIMIT = 270; // with the new ₹2000 price cap, a fresh-slate dry run showed ~274 items fit the full 10x budget; the run's own headroom-tracking will gracefully skip whatever doesn't actually fit
 // Fraction of the current lowest price to bid. Lower = bigger safety cushion against
 // price drift while an order sits unrefreshed between down/up cycles, but also lower
 // fill probability (price has to drop further to reach the bid). 0.60 assumes roughly
@@ -28,6 +28,19 @@ function savePlacedOrders(set) {
 
 function saveItemsPool() {
 	fs.writeFileSync('./items.json', JSON.stringify(allItems, null, '\t') + '\n');
+}
+
+// Steam enforces a hard cap on total active buy-order value: 10x current wallet
+// balance (confirmed verbatim in its own rejection message). Once we've hit that
+// ceiling once, this extracts the exact current total and cap so we can skip further
+// items that clearly won't fit, instead of wasting an attempt (and rate-limit budget)
+// on each one to find out.
+function parseWalletCeilingError(message) {
+	const match = message.match(/currently have ₹\s*([\d,]+\.\d+) of active orders and you can have at most ₹\s*([\d,]+\.\d+)/);
+	if (!match) return null;
+	const current = parseFloat(match[1].replace(/,/g, ''));
+	const ceiling = parseFloat(match[2].replace(/,/g, ''));
+	return { currentPaise: Math.round(current * 100), ceilingPaise: Math.round(ceiling * 100) };
 }
 
 // Append-only log of every live price+volume fetch, one JSON object per line (JSON
@@ -86,27 +99,49 @@ async function processItem(item) {
 
 	console.log(`  Sending price_total: ${priceInSmallestUnit}`);
 	await createBuyOrder(community, item.appid, item.market_hash_name, priceInSmallestUnit, item.quantity);
-	return true;
+	return priceInSmallestUnit;
 }
 
 async function startBot() {
 	await login();
 	console.log(`Pool: ${allItems.length} item(s), ${placedOrders.size} already placed. Processing the top ${items.length} unplaced by trade volume.`);
+
+	let knownHeadroomPaise = Infinity; // set once we've actually hit the 10x-wallet ceiling
+	let skippedForBudget = 0;
+
 	for (let i = 0; i < items.length; i++) {
 		const item = items[i];
 		console.log(`\n[${i + 1}/${items.length}]`);
+
+		// Once we know the remaining headroom, skip items whose cached price already
+		// won't fit, without spending an API call/rate-limit budget to find out live.
+		const estimatedBuyPaise = Math.floor((item.price_paise ?? Infinity) * DISCOUNT_FACTOR);
+		if (estimatedBuyPaise >= knownHeadroomPaise) {
+			console.log(`  Skipping ${item.name}: estimated ₹${(estimatedBuyPaise / 100).toFixed(2)} exceeds known active-orders headroom of ₹${(knownHeadroomPaise / 100).toFixed(2)}.`);
+			skippedForBudget++;
+			continue;
+		}
+
 		try {
-			const placed = await processItem(item);
-			if (placed) {
+			const placedPricePaise = await processItem(item);
+			if (placedPricePaise) {
 				placedOrders.add(item.market_hash_name);
 				savePlacedOrders(placedOrders);
+				if (knownHeadroomPaise !== Infinity) {
+					knownHeadroomPaise -= placedPricePaise; // actual price paid, not the cached estimate
+				}
 			}
 		} catch (err) {
 			console.error(`  Failed: ${err.message}`);
+			const ceilingInfo = parseWalletCeilingError(err.message);
+			if (ceilingInfo) {
+				knownHeadroomPaise = ceilingInfo.ceilingPaise - ceilingInfo.currentPaise;
+				console.log(`  Active-orders ceiling hit: ₹${(ceilingInfo.currentPaise / 100).toFixed(2)} / ₹${(ceilingInfo.ceilingPaise / 100).toFixed(2)} committed, ₹${(knownHeadroomPaise / 100).toFixed(2)} headroom remaining.`);
+			}
 		}
 		await new Promise((resolve) => setTimeout(resolve, 4500)); // pace requests between items — Steam's priceoverview limit is ~20/min per IP (community-reported), this keeps us under ~13/min for margin
 	}
-	console.log(`\nDone — processed ${items.length} item(s).`);
+	console.log(`\nDone — processed ${items.length} item(s), ${skippedForBudget} skipped due to the active-orders ceiling.`);
 }
 
 startBot().catch(console.error);

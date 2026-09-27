@@ -6,10 +6,36 @@ const APPID = 730; // Counter-Strike 2
 const PAGE_SIZE = 100;
 const PAGES_TO_SCAN = 800; // scans up to the 80,000 most-liquid items
 const MIN_PRICE_PAISE = 2000; // ₹20.00 — sell_price is in paise; rough floor so a 70% lowball fill is still worth something
+// ₹2000.00 — ceiling so no single item can eat a disproportionate share of the 10x-wallet
+// active-orders budget (confirmed exact ceiling from Steam's own rejection message) or
+// crowd out breadth. Also happens to exclude most of the volatile "hype item" tier
+// (e.g. Printstream-family skins) that's a poor fit for the weekly/fixed-discount strategy.
+const MAX_PRICE_PAISE = 200000;
+// Minimum real sales volume required to even qualify for the pool. Without this, "sort
+// by volume descending, take top TARGET_COUNT" pads out with zero/near-zero-volume junk
+// once genuinely liquid candidates run out — found ~49% of the pool had volume < 5 before
+// this was added. A smaller, all-genuine pool beats a full quota padded with dead items.
+const MIN_VOLUME = 5;
 // Matches asset_description.type strings for guns, e.g. "Mil-Spec Grade Rifle", "Restricted Pistol",
 // "Covert Sniper Rifle" — excludes knives/gloves ("Covert Knife", "Extraordinary Gloves") and
-// non-weapon items (cases, stickers, agents, etc).
+// non-weapon items (cases, stickers, agents, etc). Kept as a cheap defensive double-check even
+// though the search query below now filters server-side — costs nothing and catches surprises.
 const WEAPON_TYPE_PATTERN = /(Pistol|SMG|Rifle|Shotgun|Machine ?Gun)$/i;
+
+// Steam's market search supports server-side category filtering (verified live: each tag
+// alone returns only that type, e.g. tag_CSGO_Type_Rifle -> 2922 results all "...Grade Rifle";
+// multiple values OR together, e.g. Rifle+Pistol -> exactly 2922+3741 combined). Using this
+// instead of scanning the whole ~35,000-item catalog and filtering client-side cuts stage 1
+// from ~354 pages down to ~124 (12,303 total weapon items across these 6 tags), with 100%
+// relevant results per page instead of the ~4-10% match rate scanning everything gave.
+const WEAPON_TYPE_TAGS = [
+	'tag_CSGO_Type_Pistol',
+	'tag_CSGO_Type_SMG',
+	'tag_CSGO_Type_Rifle',
+	'tag_CSGO_Type_Shotgun',
+	'tag_CSGO_Type_Machinegun',
+	'tag_CSGO_Type_SniperRifle',
+];
 
 const STAGE1_CANDIDATE_COUNT = 2000; // broad pool gathered cheaply by listing count, before real-demand ranking
 const TARGET_COUNT = 1000; // final pool size after ranking by real trade volume
@@ -19,6 +45,13 @@ const PRICEOVERVIEW_DELAY_MS = 4500; // pace between per-item priceoverview call
 // runs, so a rate-limit hit doesn't force starting over from zero — a retry only queries
 // priceoverview for candidates not yet resolved. Delete this file to force a fresh scan.
 const CACHE_FILE = './pickItemsCache.json';
+
+function formatDuration(ms) {
+	const totalSeconds = Math.max(0, Math.round(ms / 1000));
+	const minutes = Math.floor(totalSeconds / 60);
+	const seconds = totalSeconds % 60;
+	return `${minutes}m${seconds.toString().padStart(2, '0')}s`;
+}
 
 function loadCache() {
 	if (!fs.existsSync(CACHE_FILE)) return { candidates: null, resolved: {} };
@@ -36,7 +69,8 @@ function saveCache(cache) {
 }
 
 async function fetchSearchPage(cookieString, start) {
-	const path = `/market/search/render/?query=&start=${start}&count=${PAGE_SIZE}&search_descriptions=0&sort_column=quantity&sort_dir=desc&appid=${APPID}&norender=1`;
+	const typeParams = WEAPON_TYPE_TAGS.map((tag, i) => `category_${APPID}_Type%5B${i}%5D=${tag}`).join('&');
+	const path = `/market/search/render/?query=&start=${start}&count=${PAGE_SIZE}&search_descriptions=0&sort_column=quantity&sort_dir=desc&appid=${APPID}&${typeParams}&norender=1`;
 	const { body } = await httpsRequest({
 		hostname: 'steamcommunity.com',
 		path,
@@ -56,23 +90,37 @@ async function fetchSearchPage(cookieString, start) {
 // listing counts simply from oversupply), so it's re-ranked properly in stage 2.
 async function gatherCandidates(cookieString) {
 	const candidates = [];
+	const excluded = { wrongType: 0, tooCheap: 0, tooExpensive: 0 };
 	for (let page = 0; page < PAGES_TO_SCAN; page++) {
 		const data = await fetchSearchPage(cookieString, page * PAGE_SIZE);
 		if (!data.success || !data.results?.length) break;
 
 		for (const r of data.results) {
-			if (!WEAPON_TYPE_PATTERN.test(r.asset_description?.type || '')) continue;
+			if (!WEAPON_TYPE_PATTERN.test(r.asset_description?.type || '')) {
+				excluded.wrongType++;
+				continue;
+			}
 			const price = Number(r.sell_price);
-			if (!Number.isFinite(price) || price < MIN_PRICE_PAISE) continue;
+			if (!Number.isFinite(price) || price < MIN_PRICE_PAISE) {
+				excluded.tooCheap++;
+				continue;
+			}
+			if (price > MAX_PRICE_PAISE) {
+				excluded.tooExpensive++;
+				continue;
+			}
 			candidates.push({ name: r.hash_name, market_hash_name: r.hash_name, appid: APPID, quantity: 1 });
 		}
 
 		if (candidates.length >= STAGE1_CANDIDATE_COUNT) break;
 		if ((page + 1) % 10 === 0) {
-			console.log(`  [stage 1] ...scanned ${(page + 1) * PAGE_SIZE} items, ${candidates.length}/${STAGE1_CANDIDATE_COUNT} matched so far`);
+			console.log(
+				`  [stage 1] ...scanned ${(page + 1) * PAGE_SIZE} items, ${candidates.length}/${STAGE1_CANDIDATE_COUNT} matched so far (excluded: ${JSON.stringify(excluded)})`,
+			);
 		}
 		await new Promise((resolve) => setTimeout(resolve, 1000));
 	}
+	console.log(`  [stage 1] final exclusion breakdown: ${JSON.stringify(excluded)}`);
 	return candidates.slice(0, STAGE1_CANDIDATE_COUNT);
 }
 
@@ -89,6 +137,7 @@ async function rankByDemand(candidates, cache) {
 
 	const remaining = candidates.filter((c) => !cache.resolved[c.market_hash_name]);
 	console.log(`  [stage 2] ${remaining.length}/${candidates.length} candidates still need resolving (${candidates.length - remaining.length} already cached).`);
+	const stage2StartedAt = Date.now();
 
 	for (let i = 0; i < remaining.length; i++) {
 		const item = remaining[i];
@@ -124,10 +173,13 @@ async function rankByDemand(candidates, cache) {
 
 		if ((i + 1) % 20 === 0) {
 			saveCache(cache);
-		}
-		if ((i + 1) % 100 === 0) {
+			const resolvedSoFar = Object.values(cache.resolved);
+			const qualifiedSoFar = resolvedSoFar.filter((r) => (r.volume ?? 0) >= MIN_VOLUME).length;
+			const elapsedMs = Date.now() - stage2StartedAt;
+			const itemsPerMs = (i + 1) / elapsedMs;
+			const etaMs = itemsPerMs > 0 ? (remaining.length - (i + 1)) / itemsPerMs : 0;
 			console.log(
-				`  [stage 2] ...checked ${i + 1}/${remaining.length} remaining (${newlyResolved} newly resolved, ${Object.keys(cache.resolved).length} total cached, failures: ${JSON.stringify(failureCounts)})`,
+				`  [stage 2] ${i + 1}/${remaining.length} (${((i + 1) / remaining.length * 100).toFixed(1)}%) | ${qualifiedSoFar} clear MIN_VOLUME=${MIN_VOLUME} | elapsed ${formatDuration(elapsedMs)} | ETA ${formatDuration(etaMs)} | failures: ${JSON.stringify(failureCounts)}`,
 			);
 		}
 		await new Promise((resolve) => setTimeout(resolve, PRICEOVERVIEW_DELAY_MS));
@@ -161,8 +213,11 @@ async function main() {
 	const ranked = Object.values(cache.resolved);
 	console.log(`Stage 2 done: ${ranked.length} candidates have usable price/volume data.`);
 
-	ranked.sort((a, b) => b.volume - a.volume);
-	const picked = ranked.slice(0, TARGET_COUNT);
+	const qualified = ranked.filter((item) => (item.volume ?? 0) >= MIN_VOLUME);
+	console.log(`${qualified.length}/${ranked.length} candidates clear the MIN_VOLUME (${MIN_VOLUME}) floor.`);
+
+	qualified.sort((a, b) => b.volume - a.volume);
+	const picked = qualified.slice(0, TARGET_COUNT);
 
 	console.log(`\nSelected ${picked.length} item(s) by real trade volume:`);
 	const LOG_LIMIT = 20;
