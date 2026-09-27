@@ -1,8 +1,10 @@
+const fs = require('fs');
 const { login } = require('./auth');
 const { getMyBuyOrderIds, cancelBuyOrder } = require('./market');
 
 const BATCH_SIZE = 10;
 const DELAY_BETWEEN_BATCHES_MS = 1000;
+const PLACED_ORDERS_FILE = './placedOrders.json';
 
 function chunk(array, size) {
 	const chunks = [];
@@ -42,6 +44,17 @@ async function main() {
 	}
 
 	console.log(`\nDone — ${cancelled} cancelled, ${failed} failed, out of ${ids.length}.`);
+
+	// index.js tracks which items already have an order in placedOrders.json so it can
+	// skip them on future runs. Since this cancels every active order, that tracking is
+	// now stale — reset it, but only if every cancel actually succeeded, otherwise some
+	// orders may still be live and we'd wrongly let index.js re-place duplicates for them.
+	if (failed === 0) {
+		fs.writeFileSync(PLACED_ORDERS_FILE, '[]');
+		console.log('Cleared placedOrders.json (all orders cancelled).');
+	} else {
+		console.log('Some cancellations failed — leaving placedOrders.json as-is, it may be stale for those items.');
+	}
 }
 
 main().catch(console.error);

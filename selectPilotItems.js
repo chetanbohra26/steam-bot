@@ -173,7 +173,7 @@ async function main() {
 		console.log(`  ...and ${picked.length - LOG_LIMIT} more (see items.json)`);
 	}
 
-	const items = picked.map(({ name, market_hash_name, appid, quantity, price_paise }) => ({ name, market_hash_name, appid, quantity, price_paise }));
+	const items = picked.map(({ name, market_hash_name, appid, quantity, price_paise, volume }) => ({ name, market_hash_name, appid, quantity, price_paise, volume }));
 	fs.writeFileSync('./items.json', JSON.stringify(items, null, '\t') + '\n');
 	console.log('\nWrote items.json');
 }

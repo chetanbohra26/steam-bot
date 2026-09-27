@@ -2,10 +2,11 @@ const allItems = require('./items.json');
 
 const LIMIT = 200; // matches index.js
 
-// Same selection as index.js: the LIMIT cheapest items from the pool, by cached price_paise.
-// Uses the price_paise already captured by the last pick-items run — no live API calls,
-// so this is an estimate as of whenever pick-items last ran, not current-second pricing.
-const items = [...allItems].sort((a, b) => (a.price_paise ?? Infinity) - (b.price_paise ?? Infinity)).slice(0, LIMIT);
+// Same selection as index.js: the top LIMIT items from the pool in its existing order
+// (ranked by real trade volume, highest first, by selectPilotItems.js) — not re-sorted
+// by price. Uses the price_paise already captured by the last pick-items run — no live
+// API calls, so this is an estimate as of whenever pick-items last ran, not current-second pricing.
+const items = allItems.slice(0, LIMIT);
 
 let totalBuyPaise = 0;
 console.log(`Dry run (cached prices, no live API calls) — ${items.length} of ${allItems.length} pooled items:\n`);
