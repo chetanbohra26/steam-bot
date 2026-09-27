@@ -2,14 +2,17 @@ const allItems = require('./items.json');
 
 const LIMIT = 200; // matches index.js
 
-// Same selection as index.js: the top LIMIT items from the pool in its existing order
-// (ranked by real trade volume, highest first, by selectPilotItems.js) — not re-sorted
-// by price. Uses the price_paise already captured by the last pick-items run — no live
-// API calls, so this is an estimate as of whenever pick-items last ran, not current-second pricing.
+// Deliberately NOT filtered by placedOrders.json (unlike index.js's actual selection).
+// index.js's real "next batch" shifts constantly as orders get placed mid-run, which
+// makes it a moving target unsuitable for a stable planning estimate. This always shows
+// the cost of the top LIMIT items in the pool's existing order (ranked by real trade
+// volume, highest first, by selectPilotItems.js) — a fixed reference point, not "what's
+// left to place right now". Uses price_paise from the last pick-items/up refresh — no
+// live API calls, so it's an estimate, not current-second pricing.
 const items = allItems.slice(0, LIMIT);
 
 let totalBuyPaise = 0;
-console.log(`Dry run (cached prices, no live API calls) — ${items.length} of ${allItems.length} pooled items:\n`);
+console.log(`Dry run (cached prices, no live API calls, ignores placedOrders.json) — top ${items.length} of ${allItems.length} pooled items by rank:\n`);
 
 for (const item of items) {
 	const buyPricePaise = Math.floor(item.price_paise * 0.7);
