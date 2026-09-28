@@ -9,6 +9,7 @@
 		"up": "node index.js",
 		"down": "node cancelAllBuyOrders.js",
 		"pick-items": "node selectPilotItems.js",
+		"up-noprice": "node index.js --cached",
 		"dry-run": "node dryRunUp.js"
 	},
 	"dependencies": {

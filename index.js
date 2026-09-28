@@ -12,6 +12,12 @@ const LIMIT = 500; // pool currently has 365 qualified items (below this), so th
 const DISCOUNT_FACTOR = 0.60;
 const PLACED_ORDERS_FILE = './placedOrders.json';
 const PRICE_HISTORY_FILE = './priceHistory.jsonl';
+// --cached: skip the live priceoverview fetch per item and buy off items.json's cached
+// price/volume instead. Useful right after a pick-items run, whose data is already
+// fresh — avoids stacking hundreds more priceoverview calls on the same IP the same day
+// on top of what pick-items just made. createBuyOrder itself still hits the API per
+// item, so pacing between items is unchanged either way.
+const USE_CACHED_PRICES = process.argv.includes('--cached');
 
 function loadPlacedOrders() {
 	if (!fs.existsSync(PLACED_ORDERS_FILE)) return new Set();
@@ -60,34 +66,47 @@ const placedOrders = loadPlacedOrders();
 const items = allItems.filter((item) => !placedOrders.has(item.market_hash_name)).slice(0, LIMIT);
 
 async function processItem(item) {
-	const data = await getPriceOverview(item.appid, item.market_hash_name);
-	if (!data.success) {
-		console.error(`Failed to get price for ${item.name}`);
-		return false;
+	let lowestPriceInSmallestUnit, volume;
+
+	if (USE_CACHED_PRICES) {
+		if (!Number.isFinite(item.price_paise) || item.price_paise <= 0) {
+			console.error(`Skipping ${item.name}: no usable cached price.`);
+			return false;
+		}
+		lowestPriceInSmallestUnit = item.price_paise;
+		volume = item.volume ?? 0;
+		console.log(`[${item.name}] (cached — no live fetch)`);
+		console.log(`  Cached lowest price: ₹${(lowestPriceInSmallestUnit / 100).toFixed(2)}`);
+		console.log(`  Volume: ${volume}`);
+	} else {
+		const data = await getPriceOverview(item.appid, item.market_hash_name);
+		if (!data.success) {
+			console.error(`Failed to get price for ${item.name}`);
+			return false;
+		}
+
+		const lowestPrice = parseFloat(data.lowest_price.replace(/[^0-9.]/g, ''));
+		const symbol = data.lowest_price.replace(/[\d\s.,]/g, '').trim();
+		volume = data.volume ? parseInt(String(data.volume).replace(/,/g, ''), 10) : 0;
+		lowestPriceInSmallestUnit = Math.round(lowestPrice * 100);
+
+		console.log(`[${item.name}]`);
+		console.log(`  Lowest price: ${symbol}${lowestPrice.toFixed(2)}`);
+		console.log(`  Volume: ${volume}`);
+
+		// Log this fetch to history (every time, not just on change, so the series reflects
+		// actual sampling points), and refresh the pool's cached price/volume so items.json
+		// stays current from real usage instead of only from whenever pick-items last ran.
+		appendPriceHistory(item, lowestPriceInSmallestUnit, volume);
+		if (item.price_paise !== lowestPriceInSmallestUnit || item.volume !== volume) {
+			item.price_paise = lowestPriceInSmallestUnit;
+			item.volume = volume;
+			saveItemsPool();
+		}
 	}
 
-	const lowestPrice = parseFloat(data.lowest_price.replace(/[^0-9.]/g, ''));
-	const buyPrice = lowestPrice * DISCOUNT_FACTOR;
-	const symbol = data.lowest_price.replace(/[\d\s.,]/g, '').trim();
-	const volume = data.volume ? parseInt(String(data.volume).replace(/,/g, ''), 10) : 0;
-
-	console.log(`[${item.name}]`);
-	console.log(`  Lowest price: ${symbol}${lowestPrice.toFixed(2)}`);
-	console.log(`  Buy order at: ${symbol}${buyPrice.toFixed(2)}`);
-	console.log(`  Volume: ${volume}`);
-
-	const priceInSmallestUnit = Math.floor(buyPrice * 100);
-	const lowestPriceInSmallestUnit = Math.round(lowestPrice * 100);
-
-	// Log this fetch to history (every time, not just on change, so the series reflects
-	// actual sampling points), and refresh the pool's cached price/volume so items.json
-	// stays current from real usage instead of only from whenever pick-items last ran.
-	appendPriceHistory(item, lowestPriceInSmallestUnit, volume);
-	if (item.price_paise !== lowestPriceInSmallestUnit || item.volume !== volume) {
-		item.price_paise = lowestPriceInSmallestUnit;
-		item.volume = volume;
-		saveItemsPool();
-	}
+	const priceInSmallestUnit = Math.floor(lowestPriceInSmallestUnit * DISCOUNT_FACTOR);
+	console.log(`  Buy order at: ₹${(priceInSmallestUnit / 100).toFixed(2)}`);
 
 	// Hard safety check: never let a malformed price, a rounding edge case, or a
 	// future change to the discount math result in an order at or above the
