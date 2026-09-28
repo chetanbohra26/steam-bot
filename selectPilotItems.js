@@ -39,7 +39,15 @@ const WEAPON_TYPE_TAGS = [
 
 const STAGE1_CANDIDATE_COUNT = 2000; // broad pool gathered cheaply by listing count, before real-demand ranking
 const TARGET_COUNT = 1000; // final pool size after ranking by real trade volume
-const PRICEOVERVIEW_DELAY_MS = 4500; // pace between per-item priceoverview calls in stage 2 — Steam's limit is ~20/min per IP (community-reported), this keeps us under ~13/min for margin
+// Pace between per-item priceoverview calls in stage 2. Steam's ~20/min-per-IP limit
+// (community-reported, confirmed via research 2026-09-28) appears to be shared across
+// ALL steamcommunity.com market endpoints on that IP, not siloed per-endpoint — a ban
+// on 2026-09-27 happened despite this script staying under ~13/min on its own, most
+// likely because two `up` runs (priceoverview + createbuyorder + mylistings calls) had
+// already used IP budget earlier the same day. 6000ms keeps this script itself under
+// ~10/min for more headroom, but the real fix is behavioral: see README, don't run this
+// and `up`/`down` on the same day.
+const PRICEOVERVIEW_DELAY_MS = 6000;
 
 // Caches stage 1's candidate list and stage 2's resolved (volume-checked) results across
 // runs, so a rate-limit hit doesn't force starting over from zero — a retry only queries

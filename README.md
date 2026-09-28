@@ -19,6 +19,7 @@ A Node.js bot that places lowballed buy orders across liquid Counter-Strike 2 we
 
 - **Weekly**: `npm run down` then `npm run up` — refreshes the active ~200 orders against current prices. Cancel-then-replace resets Steam's price/time queue priority, so this shouldn't be run more often than needed.
 - **Monthly**: `npm run pick-items` — re-scans and re-ranks the full item pool. `up` only ever refreshes whichever items it actually selects each run, so anything sitting deeper in the pool stays as stale as the last full scan; this is what catches that drift.
+- **Never run `pick-items` and `up`/`down` on the same day.** Each script paces its own requests safely on its own, but Steam's IP rate limit appears to be shared across all `steamcommunity.com` market endpoints (`priceoverview`, `createbuyorder`, `mylistings`, `search/render`) rather than siloed per-endpoint — hit this on 2026-09-27 when a `pick-items` run got banned mid-run despite pacing under ~13/min itself, because two `up` runs earlier that day had already used IP budget. One heavy script per day, full stop.
 
 ## How it works
 

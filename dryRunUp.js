@@ -1,6 +1,6 @@
 const allItems = require('./items.json');
 
-const LIMIT = 200; // matches index.js
+const LIMIT = 500; // matches index.js
 
 // Deliberately NOT filtered by placedOrders.json (unlike index.js's actual selection).
 // index.js's real "next batch" shifts constantly as orders get placed mid-run, which
@@ -15,7 +15,7 @@ let totalBuyPaise = 0;
 console.log(`Dry run (cached prices, no live API calls, ignores placedOrders.json) — top ${items.length} of ${allItems.length} pooled items by rank:\n`);
 
 for (const item of items) {
-	const buyPricePaise = Math.floor(item.price_paise * 0.7);
+	const buyPricePaise = Math.floor(item.price_paise * 0.6); // matches DISCOUNT_FACTOR in index.js
 	totalBuyPaise += buyPricePaise;
 	console.log(`  ${item.name} — cached ₹${(item.price_paise / 100).toFixed(2)}, would buy at ₹${(buyPricePaise / 100).toFixed(2)}`);
 }

@@ -3,7 +3,7 @@ const { login, community } = require('./auth');
 const { getPriceOverview, createBuyOrder } = require('./market');
 const allItems = require('./items.json');
 
-const LIMIT = 270; // with the new ₹2000 price cap, a fresh-slate dry run showed ~274 items fit the full 10x budget; the run's own headroom-tracking will gracefully skip whatever doesn't actually fit
+const LIMIT = 500; // pool currently has 365 qualified items (below this), so this effectively uses the whole pool; the run's own headroom-tracking will gracefully skip whatever doesn't fit the 10x-wallet budget
 // Fraction of the current lowest price to bid. Lower = bigger safety cushion against
 // price drift while an order sits unrefreshed between down/up cycles, but also lower
 // fill probability (price has to drop further to reach the bid). 0.60 assumes roughly
@@ -139,7 +139,7 @@ async function startBot() {
 				console.log(`  Active-orders ceiling hit: ₹${(ceilingInfo.currentPaise / 100).toFixed(2)} / ₹${(ceilingInfo.ceilingPaise / 100).toFixed(2)} committed, ₹${(knownHeadroomPaise / 100).toFixed(2)} headroom remaining.`);
 			}
 		}
-		await new Promise((resolve) => setTimeout(resolve, 4500)); // pace requests between items — Steam's priceoverview limit is ~20/min per IP (community-reported), this keeps us under ~13/min for margin
+		await new Promise((resolve) => setTimeout(resolve, 6000)); // pace requests between items — see selectPilotItems.js's PRICEOVERVIEW_DELAY_MS comment: Steam's rate limit appears IP-wide across market endpoints, not just priceoverview, so this stays well under the ~20/min reported ceiling
 	}
 	console.log(`\nDone — processed ${items.length} item(s), ${skippedForBudget} skipped due to the active-orders ceiling.`);
 }
