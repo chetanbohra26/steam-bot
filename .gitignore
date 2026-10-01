@@ -4,3 +4,4 @@ session.json
 pickItemsCache.json
 placedOrders.json
 priceHistory.jsonl
+buyOrderAdjustments.json

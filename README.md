@@ -10,16 +10,19 @@ A Node.js bot that places lowballed buy orders across liquid Counter-Strike 2 we
 
 ## Scripts
 
-- `npm run pick-items` — scans the market for liquid weapon skins and ranks them by real trade volume ("better horses to bet on"), writing the result to `items.json`. **Slow** (15-20+ minutes) since it respects Steam's `priceoverview` rate limit. Only needs to run occasionally — see Cadence below.
-- `npm run up` — logs in and places buy orders for the top `LIMIT` (currently 200) items in the pool that don't already have one, at `DISCOUNT_FACTOR` (currently 60%) of the current lowest price. Refreshes price/volume in `items.json` and logs every fetch to `priceHistory.jsonl` as it goes.
-- `npm run down` — cancels all active buy orders and resets the placed-orders tracking.
+- `npm run pick-items` — full refresh: scans the market for liquid weapon skins and ranks them by real trade volume ("better horses to bet on"), rebuilding `items.json` from scratch. **Slow** (~55-60 minutes) and the heaviest script — hundreds of `priceoverview` calls. Rediscovers candidates and re-ranks by volume; see Cadence below.
+- `npm run pick-items-priceonly` (`--price-only`) — fast, cheap price refresh: re-scans just stage 1 (~1 minute, ~12 requests) and updates `items.json`'s cached prices for whatever's already in the pool, leaving volume untouched. Also writes `buyOrderAdjustments.json`, flagging any **active** buy order whose reference price moved 20%+ since the order was computed, with a suggested new bid — doesn't touch any order itself.
+- `npm run up` — logs in and places buy orders for the top `LIMIT` items in the pool that don't already have one, fetching a live price per item and bidding `DISCOUNT_FACTOR` (currently 60%) of it. Refreshes price/volume in `items.json` and logs every fetch to `priceHistory.jsonl` as it goes.
+- `npm run up-noprice` (`--cached`) — same placement logic as `up`, but uses `items.json`'s already-cached prices instead of live fetches. No `priceoverview` calls at all — ideal right after a `pick-items`/`pick-items-priceonly` run whose data is already fresh.
+- `npm run down` — cancels all active buy orders (batched, paced conservatively) and, once verified empty, resets the placed-orders tracking.
 - `npm run dry-run` — shows what `up` would place and the total capital commitment, using cached prices only (no live API calls, instant).
 
 ## Operational cadence
 
-- **Weekly**: `npm run down` then `npm run up` — refreshes the active ~200 orders against current prices. Cancel-then-replace resets Steam's price/time queue priority, so this shouldn't be run more often than needed.
-- **Monthly**: `npm run pick-items` — re-scans and re-ranks the full item pool. `up` only ever refreshes whichever items it actually selects each run, so anything sitting deeper in the pool stays as stale as the last full scan; this is what catches that drift.
-- **Never run `pick-items` and `up`/`down` on the same day.** Each script paces its own requests safely on its own, but Steam's IP rate limit appears to be shared across all `steamcommunity.com` market endpoints (`priceoverview`, `createbuyorder`, `mylistings`, `search/render`) rather than siloed per-endpoint — hit this on 2026-09-27 when a `pick-items` run got banned mid-run despite pacing under ~13/min itself, because two `up` runs earlier that day had already used IP budget. One heavy script per day, full stop.
+- **Nightly**: `npm run pick-items-priceonly` — cheap enough to run every night; catches fast price moves (e.g. a new-release skin crashing 30-50%+ in days) between full refreshes, and flags active orders worth reconsidering via `buyOrderAdjustments.json`.
+- **Weekly**: `npm run down` then `npm run up` (or `up-noprice` if prices are already fresh that day) — refreshes active orders against current prices. Cancel-then-replace resets Steam's price/time queue priority, so this shouldn't be run more often than needed.
+- **Weekly**: `npm run pick-items` — full rediscovery/re-ranking, to catch new product releases entering the liquid pool. **Must be on a different day than the `down`/`up` cadence above** (see rule below) — e.g. full `pick-items` early in the week, `down`/`up` later in the week.
+- **Never run full `pick-items` and a live `up`/`down` on the same day.** Each script paces its own requests safely on its own, but Steam's IP rate limit appears to be shared across all `steamcommunity.com` market endpoints (`priceoverview`, `createbuyorder`, `mylistings`, `search/render`) rather than siloed per-endpoint — hit this on 2026-09-27 when a `pick-items` run got banned mid-run despite pacing under ~13/min itself, because two `up` runs earlier that day had already used IP budget. `pick-items-priceonly` is cheap enough (~12 requests) that it's fine on the same day as anything else, including full `pick-items` or a live `up`/`down` — just don't run it concurrently with another script that's also mid-run (same-IP collision, not a same-day one).
 
 ## How it works
 

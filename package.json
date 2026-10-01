@@ -10,6 +10,7 @@
 		"down": "node cancelAllBuyOrders.js",
 		"pick-items": "node selectPilotItems.js",
 		"up-noprice": "node index.js --cached",
+		"pick-items-priceonly": "node selectPilotItems.js --price-only",
 		"dry-run": "node dryRunUp.js"
 	},
 	"dependencies": {

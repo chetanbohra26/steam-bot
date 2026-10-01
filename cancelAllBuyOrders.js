@@ -2,8 +2,8 @@ const fs = require('fs');
 const { login } = require('./auth');
 const { getMyBuyOrderIds, cancelBuyOrder } = require('./market');
 
-const BATCH_SIZE = 10;
-const DELAY_BETWEEN_BATCHES_MS = 1000;
+const BATCH_SIZE = 5;
+const DELAY_BETWEEN_BATCHES_MS = 3000; // widened from 10/1000ms — no confirmed evidence cancelbuyorder is exempt from the same shared per-IP market rate limit that banned a priceoverview run at just ~14/min
 const PLACED_ORDERS_FILE = './placedOrders.json';
 
 function chunk(array, size) {

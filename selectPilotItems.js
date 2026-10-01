@@ -1,6 +1,7 @@
 const { login } = require('./auth');
 const { getSession, httpsRequest, getPriceOverview } = require('./market');
 const fs = require('fs');
+const allItems = require('./items.json');
 
 const APPID = 730; // Counter-Strike 2
 const PAGE_SIZE = 100;
@@ -54,11 +55,33 @@ const PRICEOVERVIEW_DELAY_MS = 6000;
 // priceoverview for candidates not yet resolved. Delete this file to force a fresh scan.
 const CACHE_FILE = './pickItemsCache.json';
 
+// --price-only: run stage 1 only and use its sell_price (already fetched for the
+// tooCheap/tooExpensive filter, just discarded before) to refresh items.json's cached
+// prices for the existing pool — no stage 2, no priceoverview calls at all. Stage 1 is
+// a handful of search/render requests (~1s apart) vs stage 2's hundreds of per-item
+// priceoverview calls (6s apart), so this is dramatically cheaper for when you just want
+// current prices and aren't expecting trade volume to have shifted much. Volume is left
+// untouched — only a full run (no flag) re-measures that.
+const SKIP_STAGE2 = process.argv.includes('--price-only');
+const NOTABLE_PCT_CHANGE = 20; // flag price moves at least this big, e.g. the P90 | Neoqueen crash (~41% in days) that prompted this
+const PLACED_ORDERS_FILE = './placedOrders.json';
+const ORDER_ADJUSTMENTS_FILE = './buyOrderAdjustments.json';
+const DISCOUNT_FACTOR = 0.60; // matches index.js — only used here to compute suggested buy-order prices for the adjustment report, not to place anything
+
 function formatDuration(ms) {
 	const totalSeconds = Math.max(0, Math.round(ms / 1000));
 	const minutes = Math.floor(totalSeconds / 60);
 	const seconds = totalSeconds % 60;
 	return `${minutes}m${seconds.toString().padStart(2, '0')}s`;
+}
+
+function loadPlacedOrders() {
+	if (!fs.existsSync(PLACED_ORDERS_FILE)) return new Set();
+	try {
+		return new Set(JSON.parse(fs.readFileSync(PLACED_ORDERS_FILE, 'utf8')));
+	} catch {
+		return new Set();
+	}
 }
 
 function loadCache() {
@@ -117,7 +140,7 @@ async function gatherCandidates(cookieString) {
 				excluded.tooExpensive++;
 				continue;
 			}
-			candidates.push({ name: r.hash_name, market_hash_name: r.hash_name, appid: APPID, quantity: 1 });
+			candidates.push({ name: r.hash_name, market_hash_name: r.hash_name, appid: APPID, quantity: 1, price_paise: price });
 		}
 
 		if (candidates.length >= STAGE1_CANDIDATE_COUNT) break;
@@ -197,13 +220,90 @@ async function rankByDemand(candidates, cache) {
 	console.log(`  [stage 2] final failure breakdown: ${JSON.stringify(failureCounts)}`);
 }
 
+// Updates items.json's cached price for every pool item found in this stage-1 scan —
+// volume is left as-is (stage 1 doesn't measure it). Items not found in this scan (fell
+// out of the top-liquidity ranking) are left unchanged rather than guessed at. Also
+// writes buyOrderAdjustments.json: for items with an ACTIVE buy order (per
+// placedOrders.json) whose price moved notably since the order was computed, lists the
+// old vs. new reference price and the old vs. suggested-new buy-order price, so you can
+// decide whether to cancel+replace that specific order — doesn't touch any order itself.
+// Relies on items.json's price_paise still reflecting the price last used to compute
+// that order (true as long as no other refresh ran in between without a re-placement).
+function applyStage1PricesToPool(candidates) {
+	const priceByName = new Map(candidates.map((c) => [c.market_hash_name, c.price_paise]));
+	const placedOrders = loadPlacedOrders();
+	let updated = 0;
+	let missing = 0;
+	const notableMoves = [];
+	const orderAdjustments = [];
+
+	for (const item of allItems) {
+		const newPrice = priceByName.get(item.market_hash_name);
+		if (newPrice === undefined) {
+			missing++;
+			continue;
+		}
+		const oldPrice = item.price_paise;
+		if (oldPrice !== newPrice) {
+			updated++;
+			if (Number.isFinite(oldPrice) && oldPrice > 0) {
+				const pctChange = ((newPrice - oldPrice) / oldPrice) * 100;
+				if (Math.abs(pctChange) >= NOTABLE_PCT_CHANGE) {
+					notableMoves.push({ name: item.name, oldPrice, newPrice, pctChange });
+					if (placedOrders.has(item.market_hash_name)) {
+						orderAdjustments.push({
+							market_hash_name: item.market_hash_name,
+							name: item.name,
+							oldPrice_paise: oldPrice,
+							oldBuyOrderPrice_paise: Math.floor(oldPrice * DISCOUNT_FACTOR),
+							newPrice_paise: newPrice,
+							suggestedBuyOrderPrice_paise: Math.floor(newPrice * DISCOUNT_FACTOR),
+							pctChange: Math.round(pctChange * 10) / 10,
+						});
+					}
+				}
+			}
+			item.price_paise = newPrice;
+		}
+	}
+
+	fs.writeFileSync('./items.json', JSON.stringify(allItems, null, '\t') + '\n');
+	console.log(`\n--price-only: updated price for ${updated}/${allItems.length} pool item(s) from the stage 1 scan (${missing} not found in this scan, left unchanged).`);
+
+	if (notableMoves.length) {
+		notableMoves.sort((a, b) => a.pctChange - b.pctChange);
+		console.log(`${notableMoves.length} item(s) moved ${NOTABLE_PCT_CHANGE}%+ since last cached price:`);
+		for (const m of notableMoves) {
+			console.log(`  ${m.name}: ₹${(m.oldPrice / 100).toFixed(2)} -> ₹${(m.newPrice / 100).toFixed(2)} (${m.pctChange >= 0 ? '+' : ''}${m.pctChange.toFixed(1)}%)`);
+		}
+	}
+
+	orderAdjustments.sort((a, b) => a.pctChange - b.pctChange);
+	fs.writeFileSync(ORDER_ADJUSTMENTS_FILE, JSON.stringify(orderAdjustments, null, '\t') + '\n');
+	if (orderAdjustments.length) {
+		console.log(`\n${orderAdjustments.length} active buy order(s) worth reviewing (price moved ${NOTABLE_PCT_CHANGE}%+ since the order was placed) — see ${ORDER_ADJUSTMENTS_FILE}`);
+	} else {
+		console.log(`\nNo active buy orders moved ${NOTABLE_PCT_CHANGE}%+ — wrote empty ${ORDER_ADJUSTMENTS_FILE}.`);
+	}
+}
+
 async function main() {
 	await login();
 	const { cookieString } = getSession();
 
 	const cache = loadCache();
 
+	// --price-only is a fresh-prices request by definition, so it always re-scans stage 1
+	// rather than reusing a (possibly stale, possibly mid-write by another run) cache.
 	let candidates;
+	if (SKIP_STAGE2) {
+		console.log('Stage 1: gathering current prices (--price-only, ignoring any cached candidates)...');
+		candidates = await gatherCandidates(cookieString);
+		console.log(`Stage 1 done: ${candidates.length} candidates.`);
+		applyStage1PricesToPool(candidates);
+		return;
+	}
+
 	if (cache.candidates) {
 		candidates = cache.candidates;
 		console.log(`Stage 1: reusing ${candidates.length} cached candidates (delete ${CACHE_FILE} to force a fresh scan).`);
