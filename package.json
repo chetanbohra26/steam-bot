@@ -4,8 +4,6 @@
 	"description": "A bot to place buy orders on Steam market",
 	"main": "index.js",
 	"scripts": {
-		"start": "node index.js",
-		"dev": "node --watch index.js",
 		"up": "node index.js",
 		"down": "node cancelAllBuyOrders.js",
 		"pick-items": "node selectPilotItems.js",
