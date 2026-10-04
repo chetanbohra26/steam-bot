@@ -127,6 +127,7 @@ async function startBot() {
 
 	let knownHeadroomPaise = Infinity; // set once we've actually hit the 10x-wallet ceiling
 	let skippedForBudget = 0;
+	let stoppedForRateLimit = false;
 
 	for (let i = 0; i < items.length; i++) {
 		const item = items[i];
@@ -152,13 +153,23 @@ async function startBot() {
 			}
 		} catch (err) {
 			console.error(`  Failed: ${err.message}`);
+			// Calling on while banned extends the ban; placedOrders.json is already saved per success.
+			if (err.message.includes('rate-limited')) {
+				stoppedForRateLimit = true;
+				break;
+			}
 			const ceilingInfo = parseWalletCeilingError(err.message);
 			if (ceilingInfo) {
 				knownHeadroomPaise = ceilingInfo.ceilingPaise - ceilingInfo.currentPaise;
 				console.log(`  Active-orders ceiling hit: ₹${(ceilingInfo.currentPaise / 100).toFixed(2)} / ₹${(ceilingInfo.ceilingPaise / 100).toFixed(2)} committed, ₹${(knownHeadroomPaise / 100).toFixed(2)} headroom remaining.`);
 			}
 		}
-		await new Promise((resolve) => setTimeout(resolve, 6000)); // pace requests between items — see selectPilotItems.js's PRICEOVERVIEW_DELAY_MS comment: Steam's rate limit appears IP-wide across market endpoints, not just priceoverview, so this stays well under the ~20/min reported ceiling
+		await new Promise((resolve) => setTimeout(resolve, 6000)); // pace requests between items — see selectPilotItems.js's PRICEOVERVIEW_DELAY_MS comment: the real limit looks like a per-hour call count (~535-585 priceoverview calls), not a per-minute rate. 6s + createBuyOrder time per item keeps live up below that, but revisit if it ever hits a limit
+	}
+	if (stoppedForRateLimit) {
+		console.error(`\nRate-limited — stopped early to avoid extending the ban. ${placedOrders.size} order(s) tracked as placed; re-run after the ban clears (hours) and already-placed items will be skipped.`);
+		process.exitCode = 1;
+		return;
 	}
 	console.log(`\nDone — processed ${items.length} item(s), ${skippedForBudget} skipped due to the active-orders ceiling.`);
 }

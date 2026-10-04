@@ -52,7 +52,7 @@
 		"market_hash_name": "Desert Eagle | Mint Fan (Field-Tested)",
 		"appid": 730,
 		"quantity": 1,
-		"price_paise": 2600,
+		"price_paise": 2300,
 		"volume": 440
 	},
 	{
@@ -132,7 +132,7 @@
 		"market_hash_name": "AK-47 | Ice Coaled (Minimal Wear)",
 		"appid": 730,
 		"quantity": 1,
-		"price_paise": 101800,
+		"price_paise": 87100,
 		"volume": 245
 	},
 	{
@@ -276,7 +276,7 @@
 		"market_hash_name": "Glock-18 | Off World (Field-Tested)",
 		"appid": 730,
 		"quantity": 1,
-		"price_paise": 4100,
+		"price_paise": 3800,
 		"volume": 162
 	},
 	{
@@ -292,7 +292,7 @@
 		"market_hash_name": "UMP-45 | K.O. Factory (Field-Tested)",
 		"appid": 730,
 		"quantity": 1,
-		"price_paise": 54400,
+		"price_paise": 57400,
 		"volume": 147
 	},
 	{
@@ -316,7 +316,7 @@
 		"market_hash_name": "Desert Eagle | Light Rail (Battle-Scarred)",
 		"appid": 730,
 		"quantity": 1,
-		"price_paise": 13400,
+		"price_paise": 14000,
 		"volume": 134
 	},
 	{
@@ -340,7 +340,7 @@
 		"market_hash_name": "Tec-9 | Sultan (Battle-Scarred)",
 		"appid": 730,
 		"quantity": 1,
-		"price_paise": 4800,
+		"price_paise": 3800,
 		"volume": 129
 	},
 	{
@@ -348,7 +348,7 @@
 		"market_hash_name": "SSG 08 | Rapid Transit (Field-Tested)",
 		"appid": 730,
 		"quantity": 1,
-		"price_paise": 12500,
+		"price_paise": 14100,
 		"volume": 129
 	},
 	{
@@ -428,7 +428,7 @@
 		"market_hash_name": "Glock-18 | Coral Bloom (Battle-Scarred)",
 		"appid": 730,
 		"quantity": 1,
-		"price_paise": 2500,
+		"price_paise": 2100,
 		"volume": 111
 	},
 	{
@@ -692,7 +692,7 @@
 		"market_hash_name": "StatTrak™ MP7 | Just Smile (Field-Tested)",
 		"appid": 730,
 		"quantity": 1,
-		"price_paise": 11300,
+		"price_paise": 10500,
 		"volume": 66
 	},
 	{
@@ -740,7 +740,7 @@
 		"market_hash_name": "StatTrak™ Nova | Dark Sigil (Minimal Wear)",
 		"appid": 730,
 		"quantity": 1,
-		"price_paise": 2200,
+		"price_paise": 2000,
 		"volume": 61
 	},
 	{
@@ -788,7 +788,7 @@
 		"market_hash_name": "PP-Bizon | Traitor (Factory New)",
 		"appid": 730,
 		"quantity": 1,
-		"price_paise": 6800,
+		"price_paise": 5800,
 		"volume": 55
 	},
 	{
@@ -796,7 +796,7 @@
 		"market_hash_name": "StatTrak™ M4A4 | Zubastick (Well-Worn)",
 		"appid": 730,
 		"quantity": 1,
-		"price_paise": 2500,
+		"price_paise": 2400,
 		"volume": 54
 	},
 	{
@@ -820,7 +820,7 @@
 		"market_hash_name": "AK-47 | Phantom Disruptor (Battle-Scarred)",
 		"appid": 730,
 		"quantity": 1,
-		"price_paise": 64200,
+		"price_paise": 63700,
 		"volume": 52
 	},
 	{
@@ -932,7 +932,7 @@
 		"market_hash_name": "Desert Eagle | Bronze Deco (Factory New)",
 		"appid": 730,
 		"quantity": 1,
-		"price_paise": 9500,
+		"price_paise": 8900,
 		"volume": 45
 	},
 	{
@@ -940,7 +940,7 @@
 		"market_hash_name": "P90 | Wave Breaker (Battle-Scarred)",
 		"appid": 730,
 		"quantity": 1,
-		"price_paise": 5200,
+		"price_paise": 5400,
 		"volume": 45
 	},
 	{
@@ -1228,7 +1228,7 @@
 		"market_hash_name": "AWP | Acheron (Well-Worn)",
 		"appid": 730,
 		"quantity": 1,
-		"price_paise": 11400,
+		"price_paise": 11800,
 		"volume": 30
 	},
 	{
@@ -1260,7 +1260,7 @@
 		"market_hash_name": "CZ75-Auto | Polymer (Field-Tested)",
 		"appid": 730,
 		"quantity": 1,
-		"price_paise": 7900,
+		"price_paise": 8700,
 		"volume": 29
 	},
 	{
@@ -1412,7 +1412,7 @@
 		"market_hash_name": "Tec-9 | Remote Control (Battle-Scarred)",
 		"appid": 730,
 		"quantity": 1,
-		"price_paise": 24900,
+		"price_paise": 24300,
 		"volume": 26
 	},
 	{
@@ -1444,7 +1444,7 @@
 		"market_hash_name": "Five-SeveN | Urban Hazard (Factory New)",
 		"appid": 730,
 		"quantity": 1,
-		"price_paise": 48100,
+		"price_paise": 42300,
 		"volume": 24
 	},
 	{
@@ -1548,7 +1548,7 @@
 		"market_hash_name": "StatTrak™ MAG-7 | MAGnitude (Minimal Wear)",
 		"appid": 730,
 		"quantity": 1,
-		"price_paise": 6100,
+		"price_paise": 5800,
 		"volume": 22
 	},
 	{
@@ -1572,7 +1572,7 @@
 		"market_hash_name": "Desert Eagle | Directive (Well-Worn)",
 		"appid": 730,
 		"quantity": 1,
-		"price_paise": 14700,
+		"price_paise": 14800,
 		"volume": 21
 	},
 	{
@@ -1612,7 +1612,7 @@
 		"market_hash_name": "M4A1-S | Flashback (Minimal Wear)",
 		"appid": 730,
 		"quantity": 1,
-		"price_paise": 113300,
+		"price_paise": 103400,
 		"volume": 20
 	},
 	{
@@ -1620,7 +1620,7 @@
 		"market_hash_name": "MP9 | Black Sand (Battle-Scarred)",
 		"appid": 730,
 		"quantity": 1,
-		"price_paise": 1800,
+		"price_paise": 2500,
 		"volume": 20
 	},
 	{
@@ -1628,7 +1628,7 @@
 		"market_hash_name": "StatTrak™ MAC-10 | Button Masher (Field-Tested)",
 		"appid": 730,
 		"quantity": 1,
-		"price_paise": 7200,
+		"price_paise": 7600,
 		"volume": 20
 	},
 	{
@@ -1732,7 +1732,7 @@
 		"market_hash_name": "Nova | Toy Soldier (Minimal Wear)",
 		"appid": 730,
 		"quantity": 1,
-		"price_paise": 70200,
+		"price_paise": 71700,
 		"volume": 17
 	},
 	{
@@ -1748,7 +1748,7 @@
 		"market_hash_name": "Nova | Smart Gun (Minimal Wear)",
 		"appid": 730,
 		"quantity": 1,
-		"price_paise": 62500,
+		"price_paise": 63700,
 		"volume": 17
 	},
 	{
@@ -1772,7 +1772,7 @@
 		"market_hash_name": "P2000 | Handgun (Field-Tested)",
 		"appid": 730,
 		"quantity": 1,
-		"price_paise": 10700,
+		"price_paise": 10500,
 		"volume": 16
 	},
 	{
@@ -1868,7 +1868,7 @@
 		"market_hash_name": "Souvenir Dual Berettas | Oil Change (Field-Tested)",
 		"appid": 730,
 		"quantity": 1,
-		"price_paise": 3100,
+		"price_paise": 3300,
 		"volume": 13
 	},
 	{
@@ -1956,7 +1956,7 @@
 		"market_hash_name": "StatTrak™ MP7 | Abyssal Apparition (Well-Worn)",
 		"appid": 730,
 		"quantity": 1,
-		"price_paise": 65700,
+		"price_paise": 66000,
 		"volume": 13
 	},
 	{
@@ -2228,7 +2228,7 @@
 		"market_hash_name": "StatTrak™ SSG 08 | Ghost Crusader (Well-Worn)",
 		"appid": 730,
 		"quantity": 1,
-		"price_paise": 22100,
+		"price_paise": 22300,
 		"volume": 10
 	},
 	{
@@ -2300,7 +2300,7 @@
 		"market_hash_name": "StatTrak™ Glock-18 | Warhawk (Battle-Scarred)",
 		"appid": 730,
 		"quantity": 1,
-		"price_paise": 5000,
+		"price_paise": 5400,
 		"volume": 9
 	},
 	{
@@ -2332,7 +2332,7 @@
 		"market_hash_name": "Tec-9 | Fuel Injector (Battle-Scarred)",
 		"appid": 730,
 		"quantity": 1,
-		"price_paise": 134300,
+		"price_paise": 136600,
 		"volume": 9
 	},
 	{
@@ -2436,7 +2436,7 @@
 		"market_hash_name": "StatTrak™ MP7 | Powercore (Field-Tested)",
 		"appid": 730,
 		"quantity": 1,
-		"price_paise": 20500,
+		"price_paise": 22600,
 		"volume": 8
 	},
 	{
@@ -2636,7 +2636,7 @@
 		"market_hash_name": "Souvenir R8 Revolver | Night (Well-Worn)",
 		"appid": 730,
 		"quantity": 1,
-		"price_paise": 2300,
+		"price_paise": 2200,
 		"volume": 6
 	},
 	{
@@ -2652,7 +2652,7 @@
 		"market_hash_name": "Souvenir Galil AR | Amber Fade (Factory New)",
 		"appid": 730,
 		"quantity": 1,
-		"price_paise": 100900,
+		"price_paise": 101000,
 		"volume": 6
 	},
 	{
@@ -2836,7 +2836,7 @@
 		"market_hash_name": "StatTrak™ SSG 08 | Dark Water (Minimal Wear)",
 		"appid": 730,
 		"quantity": 1,
-		"price_paise": 61600,
+		"price_paise": 68100,
 		"volume": 5
 	},
 	{
@@ -2868,7 +2868,7 @@
 		"market_hash_name": "MAC-10 | Urban DDPAT (Field-Tested)",
 		"appid": 730,
 		"quantity": 1,
-		"price_paise": 21000,
+		"price_paise": 20900,
 		"volume": 5
 	},
 	{

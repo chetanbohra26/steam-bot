@@ -5,7 +5,10 @@ const { getCookies } = require('./auth');
 async function getPriceOverview(appid, market_hash_name) {
 	const currency = process.env.CURRENCY || 1;
 	const path = `/market/priceoverview/?appid=${appid}&market_hash_name=${encodeURIComponent(market_hash_name)}&currency=${currency}`;
-	const { body } = await httpsRequest({ hostname: 'steamcommunity.com', path, method: 'GET' });
+	const { statusCode, body } = await httpsRequest({ hostname: 'steamcommunity.com', path, method: 'GET' });
+	if (statusCode === 429) {
+		throw new Error(`priceoverview rate-limited (HTTP 429) for ${market_hash_name} — do not retry immediately, wait hours`);
+	}
 	const data = JSON.parse(body);
 
 	// Steam returns a literal "null" body (parses to JS null) when priceoverview is

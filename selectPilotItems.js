@@ -45,10 +45,13 @@ const TARGET_COUNT = 1000; // final pool size after ranking by real trade volume
 // ALL steamcommunity.com market endpoints on that IP, not siloed per-endpoint — a ban
 // on 2026-09-27 happened despite this script staying under ~13/min on its own, most
 // likely because two `up` runs (priceoverview + createbuyorder + mylistings calls) had
-// already used IP budget earlier the same day. 6000ms keeps this script itself under
-// ~10/min for more headroom, but the real fix is behavioral: see README, don't run this
-// and `up`/`down` on the same day.
-const PRICEOVERVIEW_DELAY_MS = 6000;
+// already used IP budget earlier the same day. A second ban on 2026-10-03 hit at ~585
+// calls in ~62 min (pace ~9.5/min, nothing else running that day), while 535 calls in
+// ~56 min on 2026-09-28 was fine — so the real limit looks like a per-hour call count,
+// roughly 535-585, not a per-minute rate. 7000ms (+~0.35s request time) is ~7.35s per
+// item, ~490 calls/hour, which keeps any rolling hour under the highest known-safe count.
+const PRICEOVERVIEW_DELAY_MS = 7000;
+const REQUEST_OVERHEAD_MS = 350; // measured: ~6.35s per item at a 6000ms delay
 
 // Caches stage 1's candidate list and stage 2's resolved (volume-checked) results across
 // runs, so a rate-limit hit doesn't force starting over from zero — a retry only queries
@@ -59,7 +62,7 @@ const CACHE_FILE = './pickItemsCache.json';
 // tooCheap/tooExpensive filter, just discarded before) to refresh items.json's cached
 // prices for the existing pool — no stage 2, no priceoverview calls at all. Stage 1 is
 // a handful of search/render requests (~1s apart) vs stage 2's hundreds of per-item
-// priceoverview calls (6s apart), so this is dramatically cheaper for when you just want
+// priceoverview calls (7s apart), so this is dramatically cheaper for when you just want
 // current prices and aren't expecting trade volume to have shifted much. Volume is left
 // untouched — only a full run (no flag) re-measures that.
 const SKIP_STAGE2 = process.argv.includes('--price-only');
@@ -163,61 +166,79 @@ async function gatherCandidates(cookieString) {
 // rate-limit hit partway through doesn't lose everything already fetched.
 async function rankByDemand(candidates, cache) {
 	const failureCounts = {};
-	let loggedSamples = 0;
 	let newlyResolved = 0;
 
 	const remaining = candidates.filter((c) => !cache.resolved[c.market_hash_name]);
 	console.log(`  [stage 2] ${remaining.length}/${candidates.length} candidates still need resolving (${candidates.length - remaining.length} already cached).`);
+	const perItemMs = PRICEOVERVIEW_DELAY_MS + REQUEST_OVERHEAD_MS;
+	console.log(`  [stage 2] pacing ${PRICEOVERVIEW_DELAY_MS / 1000}s delay -> ~${Math.round(3600000 / perItemMs)} calls/hour, estimated ${formatDuration(remaining.length * perItemMs)} for ${remaining.length} item(s).`);
+	const poolPriceByName = new Map(allItems.map((p) => [p.market_hash_name, p.price_paise]));
+	const parseRupees = (s) => (s ? parseFloat(String(s).replace(/[^0-9.]/g, '')) : NaN);
 	const stage2StartedAt = Date.now();
-
 	for (let i = 0; i < remaining.length; i++) {
 		const item = remaining[i];
+		const prefix = `  [stage 2] ${i + 1}/${remaining.length} (${((i + 1) / remaining.length * 100).toFixed(1)}%) ${item.name}`;
+		let detail;
 		try {
 			const data = await getPriceOverview(item.appid, item.market_hash_name);
 			if (data.success && data.lowest_price) {
-				const priceRupees = parseFloat(data.lowest_price.replace(/[^0-9.]/g, ''));
+				const priceRupees = parseRupees(data.lowest_price);
+				const medianRupees = parseRupees(data.median_price);
 				const volume = data.volume ? parseInt(String(data.volume).replace(/,/g, ''), 10) : 0;
 				if (priceRupees > 0) {
+					const pricePaise = Math.round(priceRupees * 100);
 					cache.resolved[item.market_hash_name] = {
 						...item,
-						price_paise: Math.round(priceRupees * 100),
+						price_paise: pricePaise,
 						volume,
 					};
 					newlyResolved++;
+
+					const prevPaise = poolPriceByName.get(item.market_hash_name);
+					const vsPool =
+						Number.isFinite(prevPaise) && prevPaise > 0
+							? `was ₹${(prevPaise / 100).toFixed(2)} in pool, ${pricePaise >= prevPaise ? '+' : ''}${(((pricePaise - prevPaise) / prevPaise) * 100).toFixed(1)}%`
+							: 'new to pool';
+					const median = Number.isFinite(medianRupees) ? `₹${medianRupees.toFixed(2)}` : 'n/a';
+					detail = `₹${priceRupees.toFixed(2)} (${vsPool}) | median ${median} | vol ${volume} ${volume >= MIN_VOLUME ? 'OK' : `below floor ${MIN_VOLUME}`}`;
 				} else {
 					failureCounts.zeroPrice = (failureCounts.zeroPrice || 0) + 1;
+					detail = `FAILED zero price: ${JSON.stringify(data)}`;
 				}
 			} else {
 				failureCounts.unsuccessful = (failureCounts.unsuccessful || 0) + 1;
-				if (loggedSamples < 3) {
-					console.log(`  [stage 2] sample failure for "${item.name}": ${JSON.stringify(data)}`);
-					loggedSamples++;
-				}
+				detail = `FAILED no price data: ${JSON.stringify(data)}`;
 			}
 		} catch (err) {
 			failureCounts.exception = (failureCounts.exception || 0) + 1;
-			if (loggedSamples < 3) {
-				console.log(`  [stage 2] sample exception for "${item.name}": ${err.message}`);
-				loggedSamples++;
+			detail = `FAILED: ${err.message}`;
+			// Steam's ban extends if you keep calling while banned, so stop on the first
+			// rate-limit: save progress, unwind normally, and let node exit on its own.
+			if (err.message.includes('rate-limited')) {
+				console.log(`${prefix} | ${detail}`);
+				saveCache(cache);
+				console.log(`\n  [stage 2] rate-limited — stopping to avoid extending the ban. ${Object.keys(cache.resolved).length}/${candidates.length} candidates are saved in ${CACHE_FILE}; re-run pick-items after the ban clears (hours) to resume.`);
+				process.exitCode = 1;
+				return true;
 			}
 		}
 
-		if ((i + 1) % 20 === 0) {
-			saveCache(cache);
-			const resolvedSoFar = Object.values(cache.resolved);
-			const qualifiedSoFar = resolvedSoFar.filter((r) => (r.volume ?? 0) >= MIN_VOLUME).length;
-			const elapsedMs = Date.now() - stage2StartedAt;
-			const itemsPerMs = (i + 1) / elapsedMs;
-			const etaMs = itemsPerMs > 0 ? (remaining.length - (i + 1)) / itemsPerMs : 0;
-			console.log(
-				`  [stage 2] ${i + 1}/${remaining.length} (${((i + 1) / remaining.length * 100).toFixed(1)}%) | ${qualifiedSoFar} clear MIN_VOLUME=${MIN_VOLUME} | elapsed ${formatDuration(elapsedMs)} | ETA ${formatDuration(etaMs)} | failures: ${JSON.stringify(failureCounts)}`,
-			);
-		}
+		if ((i + 1) % 20 === 0) saveCache(cache);
+
+		const qualifiedSoFar = Object.values(cache.resolved).filter((r) => (r.volume ?? 0) >= MIN_VOLUME).length;
+		const elapsedMs = Date.now() - stage2StartedAt;
+		// This line prints before this item's trailing delay, so elapsedMs holds i+1 requests but
+		// only i delays; adding the pending delay makes it i+1 full cycles and keeps the ETA stable.
+		const etaMs = ((remaining.length - (i + 1)) * (elapsedMs + PRICEOVERVIEW_DELAY_MS)) / (i + 1);
+		const failures = Object.keys(failureCounts).length ? ` | failures: ${JSON.stringify(failureCounts)}` : '';
+		console.log(`${prefix} | ${detail} | ${qualifiedSoFar} qualified | elapsed ${formatDuration(elapsedMs)} | ETA ${formatDuration(etaMs)}${failures}`);
+
 		await new Promise((resolve) => setTimeout(resolve, PRICEOVERVIEW_DELAY_MS));
 	}
 
 	saveCache(cache);
 	console.log(`  [stage 2] final failure breakdown: ${JSON.stringify(failureCounts)}`);
+	return false;
 }
 
 // Updates items.json's cached price for every pool item found in this stage-1 scan —
@@ -316,7 +337,11 @@ async function main() {
 	}
 
 	console.log('Stage 2: fetching real sales volume per candidate (this takes a while)...');
-	await rankByDemand(candidates, cache);
+	const stoppedEarly = await rankByDemand(candidates, cache);
+	if (stoppedEarly) {
+		console.log('Not writing items.json from a partial run — it still has the previous pool.');
+		return;
+	}
 
 	const ranked = Object.values(cache.resolved);
 	console.log(`Stage 2 done: ${ranked.length} candidates have usable price/volume data.`);
