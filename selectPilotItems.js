@@ -4,8 +4,12 @@ const fs = require('fs');
 const allItems = require('./items.json');
 
 const APPID = 730; // Counter-Strike 2
+// Requested page size. Steam currently ignores this and returns 10 per page (verified
+// 2026-10-04 with count=5/10/20/50/100), so paging advances by the number of results
+// actually returned — stepping by PAGE_SIZE made the old scan read only ~10% of the market.
 const PAGE_SIZE = 100;
-const PAGES_TO_SCAN = 800; // scans up to the 80,000 most-liquid items
+const MAX_STAGE1_PAGES = 1500; // safety cap on requests; the full weapon catalog is ~1,236 pages at 10/page
+const STAGE1_PAGE_DELAY_MS = 2000; // ~30 requests/min; stage 1 normally stops long before the catalog end
 const MIN_PRICE_PAISE = 2000; // ₹20.00 — sell_price is in paise; rough floor so a 70% lowball fill is still worth something
 // ₹2000.00 — ceiling so no single item can eat a disproportionate share of the 10x-wallet
 // active-orders budget (confirmed exact ceiling from Steam's own rejection message) or
@@ -26,9 +30,9 @@ const WEAPON_TYPE_PATTERN = /(Pistol|SMG|Rifle|Shotgun|Machine ?Gun)$/i;
 // Steam's market search supports server-side category filtering (verified live: each tag
 // alone returns only that type, e.g. tag_CSGO_Type_Rifle -> 2922 results all "...Grade Rifle";
 // multiple values OR together, e.g. Rifle+Pistol -> exactly 2922+3741 combined). Using this
-// instead of scanning the whole ~35,000-item catalog and filtering client-side cuts stage 1
-// from ~354 pages down to ~124 (12,303 total weapon items across these 6 tags), with 100%
-// relevant results per page instead of the ~4-10% match rate scanning everything gave.
+// instead of scanning the whole ~35,000-item catalog and filtering client-side means every
+// result is a weapon (12,357 items across these 6 tags as of 2026-10-04) instead of the
+// ~4-10% match rate scanning everything gave.
 const WEAPON_TYPE_TAGS = [
 	'tag_CSGO_Type_Pistol',
 	'tag_CSGO_Type_SMG',
@@ -38,7 +42,10 @@ const WEAPON_TYPE_TAGS = [
 	'tag_CSGO_Type_SniperRifle',
 ];
 
-const STAGE1_CANDIDATE_COUNT = 2000; // broad pool gathered cheaply by listing count, before real-demand ranking
+// Broad pool gathered cheaply by listing count (most-listed first), before real-demand ranking.
+// Kept at 1000 because stage 2 (one priceoverview call per candidate, ~490/hour) is the real
+// cost: 1000 candidates is ~2 hours of stage 2, less when volumes are already cached.
+const STAGE1_CANDIDATE_COUNT = 1000;
 const TARGET_COUNT = 1000; // final pool size after ranking by real trade volume
 // Pace between per-item priceoverview calls in stage 2. Steam's ~20/min-per-IP limit
 // (community-reported, confirmed via research 2026-09-28) appears to be shared across
@@ -57,6 +64,7 @@ const REQUEST_OVERHEAD_MS = 350; // measured: ~6.35s per item at a 6000ms delay
 // runs, so a rate-limit hit doesn't force starting over from zero — a retry only queries
 // priceoverview for candidates not yet resolved. Delete this file to force a fresh scan.
 const CACHE_FILE = './pickItemsCache.json';
+const CACHE_STAGE1_VERSION = 2; // bump whenever stage 1's candidate selection changes; v2 = paging fix (2026-10-04)
 
 // --price-only: run stage 1 only and use its sell_price (already fetched for the
 // tooCheap/tooExpensive filter, just discarded before) to refresh items.json's cached
@@ -91,7 +99,16 @@ function loadCache() {
 	if (!fs.existsSync(CACHE_FILE)) return { candidates: null, resolved: {} };
 	try {
 		const raw = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf8'));
-		return { candidates: raw.candidates || null, resolved: raw.resolved || {} };
+		const resolved = raw.resolved || {};
+		// Candidate lists from before the paging fix came from a ~10% sample of the market, so
+		// drop them. Resolved price/volume entries are per-item facts and stay valid.
+		if (raw.stage1Version !== CACHE_STAGE1_VERSION) {
+			if (raw.candidates) {
+				console.log(`Cache: discarding ${raw.candidates.length} stage-1 candidates from the old partial scan; keeping ${Object.keys(resolved).length} already-resolved volumes.`);
+			}
+			return { candidates: null, resolved };
+		}
+		return { candidates: raw.candidates || null, resolved };
 	} catch (err) {
 		console.error('Failed to read cache, starting fresh:', err.message);
 		return { candidates: null, resolved: {} };
@@ -99,13 +116,13 @@ function loadCache() {
 }
 
 function saveCache(cache) {
-	fs.writeFileSync(CACHE_FILE, JSON.stringify(cache, null, '\t'));
+	fs.writeFileSync(CACHE_FILE, JSON.stringify({ ...cache, stage1Version: CACHE_STAGE1_VERSION }, null, '\t'));
 }
 
 async function fetchSearchPage(cookieString, start) {
 	const typeParams = WEAPON_TYPE_TAGS.map((tag, i) => `category_${APPID}_Type%5B${i}%5D=${tag}`).join('&');
 	const path = `/market/search/render/?query=&start=${start}&count=${PAGE_SIZE}&search_descriptions=0&sort_column=quantity&sort_dir=desc&appid=${APPID}&${typeParams}&norender=1`;
-	const { body } = await httpsRequest({
+	const { statusCode, body } = await httpsRequest({
 		hostname: 'steamcommunity.com',
 		path,
 		method: 'GET',
@@ -115,6 +132,9 @@ async function fetchSearchPage(cookieString, start) {
 			'Referer': `https://steamcommunity.com/market/search?appid=${APPID}`,
 		},
 	});
+	if (statusCode === 429) {
+		throw new Error('search/render rate-limited (HTTP 429) — do not retry immediately, wait hours');
+	}
 	return JSON.parse(body);
 }
 
@@ -124,12 +144,29 @@ async function fetchSearchPage(cookieString, start) {
 // listing counts simply from oversupply), so it's re-ranked properly in stage 2.
 async function gatherCandidates(cookieString) {
 	const candidates = [];
-	const excluded = { wrongType: 0, tooCheap: 0, tooExpensive: 0 };
-	for (let page = 0; page < PAGES_TO_SCAN; page++) {
-		const data = await fetchSearchPage(cookieString, page * PAGE_SIZE);
+	const seen = new Set();
+	const excluded = { wrongType: 0, tooCheap: 0, tooExpensive: 0, duplicate: 0 };
+	let start = 0;
+	let totalCount = null;
+	let requests = 0;
+	for (let page = 0; page < MAX_STAGE1_PAGES; page++) {
+		const data = await fetchSearchPage(cookieString, start);
+		requests++;
 		if (!data.success || !data.results?.length) break;
+		if (totalCount === null) {
+			totalCount = data.total_count ?? null;
+			console.log(
+				`  [stage 1] ${totalCount ?? '?'} weapon items on the market, ${data.results.length} per page; paging by actual page size, ${STAGE1_PAGE_DELAY_MS / 1000}s per request, stopping at ${STAGE1_CANDIDATE_COUNT} in-band matches.`,
+			);
+		}
 
 		for (const r of data.results) {
+			// The ordering can shift between page requests, so the same item can show up twice.
+			if (seen.has(r.hash_name)) {
+				excluded.duplicate++;
+				continue;
+			}
+			seen.add(r.hash_name);
 			if (!WEAPON_TYPE_PATTERN.test(r.asset_description?.type || '')) {
 				excluded.wrongType++;
 				continue;
@@ -146,15 +183,17 @@ async function gatherCandidates(cookieString) {
 			candidates.push({ name: r.hash_name, market_hash_name: r.hash_name, appid: APPID, quantity: 1, price_paise: price });
 		}
 
+		start += data.results.length;
 		if (candidates.length >= STAGE1_CANDIDATE_COUNT) break;
-		if ((page + 1) % 10 === 0) {
+		if (totalCount !== null && start >= totalCount) break;
+		if (requests % 20 === 0) {
 			console.log(
-				`  [stage 1] ...scanned ${(page + 1) * PAGE_SIZE} items, ${candidates.length}/${STAGE1_CANDIDATE_COUNT} matched so far (excluded: ${JSON.stringify(excluded)})`,
+				`  [stage 1] ...${start}/${totalCount ?? '?'} items scanned (${requests} requests), ${candidates.length}/${STAGE1_CANDIDATE_COUNT} matched so far (excluded: ${JSON.stringify(excluded)})`,
 			);
 		}
-		await new Promise((resolve) => setTimeout(resolve, 1000));
+		await new Promise((resolve) => setTimeout(resolve, STAGE1_PAGE_DELAY_MS));
 	}
-	console.log(`  [stage 1] final exclusion breakdown: ${JSON.stringify(excluded)}`);
+	console.log(`  [stage 1] ${start} items scanned in ${requests} requests; exclusion breakdown: ${JSON.stringify(excluded)}`);
 	return candidates.slice(0, STAGE1_CANDIDATE_COUNT);
 }
 
