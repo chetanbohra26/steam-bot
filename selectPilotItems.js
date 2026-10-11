@@ -10,12 +10,19 @@ const APPID = 730; // Counter-Strike 2
 const PAGE_SIZE = 100;
 const MAX_STAGE1_PAGES = 1500; // safety cap on requests; the full weapon catalog is ~1,236 pages at 10/page
 const STAGE1_PAGE_DELAY_MS = 2000; // ~30 requests/min; stage 1 normally stops long before the catalog end
-const MIN_PRICE_PAISE = 2000; // ₹20.00 — sell_price is in paise; rough floor so a 70% lowball fill is still worth something
-// ₹2000.00 — ceiling so no single item can eat a disproportionate share of the 10x-wallet
-// active-orders budget (confirmed exact ceiling from Steam's own rejection message) or
-// crowd out breadth. Also happens to exclude most of the volatile "hype item" tier
-// (e.g. Printstream-family skins) that's a poor fit for the weekly/fixed-discount strategy.
-const MAX_PRICE_PAISE = 200000;
+const MIN_PRICE_PAISE = 2500; // ₹25.00 — prices are in paise; floor so a 60% lowball fill is still worth something
+// ₹500.00 (was ₹2000) — ceiling so no single item can eat a disproportionate share of the
+// 10x-wallet active-orders budget (confirmed exact ceiling from Steam's own rejection
+// message) or crowd out breadth. In the 2026-10-11 data, items above ₹500 were ~11% of the
+// pool but ~68% of the total bid cost. Also excludes the volatile "hype item" tier.
+const MAX_PRICE_PAISE = 50000;
+// Souvenir items are dropped: thin volume (about a third clear volume 50, vs 72% of normal
+// skins) and extra pricing noise from stickers/tournament drops. StatTrak™ is kept — many
+// StatTrak™ items are among the most liquid in the pool, and the volume floor handles the
+// thin ones.
+const EXCLUDED_NAME_PATTERN = /^Souvenir /;
+const isEligible = (name, pricePaise) =>
+	!EXCLUDED_NAME_PATTERN.test(name) && Number.isFinite(pricePaise) && pricePaise >= MIN_PRICE_PAISE && pricePaise <= MAX_PRICE_PAISE;
 // Minimum real sales volume required to even qualify for the pool. Without this, "sort
 // by volume descending, take top TARGET_COUNT" pads out with zero/near-zero-volume junk
 // once genuinely liquid candidates run out — found ~49% of the pool had volume < 5 before
@@ -57,14 +64,28 @@ const TARGET_COUNT = 1000; // final pool size after ranking by real trade volume
 // ~56 min on 2026-09-28 was fine — so the real limit looks like a per-hour call count,
 // roughly 535-585, not a per-minute rate. 7000ms (+~0.35s request time) is ~7.35s per
 // item, ~490 calls/hour, which keeps any rolling hour under the highest known-safe count.
-const PRICEOVERVIEW_DELAY_MS = 7000;
+// A third ban on 2026-10-11 hit at ~585 stage-2 calls again, at an even slower pace
+// (~8/min). Two bans at nearly the same call count but different paces suggest a count cap
+// of roughly 585 per window, not a rate, so a longer delay only postpones the same ban —
+// the lasting fix is capping calls per run and resuming later via the cache. Whether stage
+// 1's search requests also count is unproven (the 2026-10-03 ban had none that day). The
+// delay was set to 10000ms (~340 calls/hour) with +/-20% jitter as an extra margin.
+const PRICEOVERVIEW_DELAY_MS = 10000;
+const PRICEOVERVIEW_JITTER = 0.2;
+const jitteredDelayMs = () => Math.round(PRICEOVERVIEW_DELAY_MS * (1 - PRICEOVERVIEW_JITTER + Math.random() * 2 * PRICEOVERVIEW_JITTER));
+// If stage 2 is cut short (rate limit), still write items.json when at least this many
+// candidates already clear MIN_VOLUME, instead of discarding a nearly-complete pool.
+const MIN_QUALIFIED_TO_WRITE = 950;
+// --from-cache: skip stage 2 entirely and build the pool from already-resolved volumes in
+// the cache. Makes no market calls, so it is safe to run while rate-limited.
+const FROM_CACHE = process.argv.includes('--from-cache');
 const REQUEST_OVERHEAD_MS = 350; // measured: ~6.35s per item at a 6000ms delay
 
 // Caches stage 1's candidate list and stage 2's resolved (volume-checked) results across
 // runs, so a rate-limit hit doesn't force starting over from zero — a retry only queries
 // priceoverview for candidates not yet resolved. Delete this file to force a fresh scan.
 const CACHE_FILE = './pickItemsCache.json';
-const CACHE_STAGE1_VERSION = 2; // bump whenever stage 1's candidate selection changes; v2 = paging fix (2026-10-04)
+const CACHE_STAGE1_VERSION = 3; // bump whenever stage 1's candidate selection changes; v2 = paging fix (2026-10-04), v3 = Rs25-500 band + no Souvenir (2026-10-11)
 
 // --price-only: run stage 1 only and use its sell_price (already fetched for the
 // tooCheap/tooExpensive filter, just discarded before) to refresh items.json's cached
@@ -104,7 +125,7 @@ function loadCache() {
 		// drop them. Resolved price/volume entries are per-item facts and stay valid.
 		if (raw.stage1Version !== CACHE_STAGE1_VERSION) {
 			if (raw.candidates) {
-				console.log(`Cache: discarding ${raw.candidates.length} stage-1 candidates from the old partial scan; keeping ${Object.keys(resolved).length} already-resolved volumes.`);
+				console.log(`Cache: discarding ${raw.candidates.length} stage-1 candidates picked under an older scan/filter version; keeping ${Object.keys(resolved).length} already-resolved volumes.`);
 			}
 			return { candidates: null, resolved };
 		}
@@ -164,7 +185,7 @@ async function fetchSearchPageWithRetry(cookieString, start) {
 async function gatherCandidates(cookieString) {
 	const candidates = [];
 	const seen = new Set();
-	const excluded = { wrongType: 0, tooCheap: 0, tooExpensive: 0, duplicate: 0 };
+	const excluded = { wrongType: 0, souvenir: 0, tooCheap: 0, tooExpensive: 0, duplicate: 0 };
 	let start = 0;
 	let totalCount = null;
 	let requests = 0;
@@ -188,6 +209,10 @@ async function gatherCandidates(cookieString) {
 			seen.add(r.hash_name);
 			if (!WEAPON_TYPE_PATTERN.test(r.asset_description?.type || '')) {
 				excluded.wrongType++;
+				continue;
+			}
+			if (EXCLUDED_NAME_PATTERN.test(r.hash_name)) {
+				excluded.souvenir++;
 				continue;
 			}
 			const price = Number(r.sell_price);
@@ -283,7 +308,7 @@ async function rankByDemand(candidates, cache) {
 
 		if ((i + 1) % 20 === 0) saveCache(cache);
 
-		const qualifiedSoFar = Object.values(cache.resolved).filter((r) => (r.volume ?? 0) >= MIN_VOLUME).length;
+		const qualifiedSoFar = Object.values(cache.resolved).filter((r) => isEligible(r.name, r.price_paise) && (r.volume ?? 0) >= MIN_VOLUME).length;
 		const elapsedMs = Date.now() - stage2StartedAt;
 		// This line prints before this item's trailing delay, so elapsedMs holds i+1 requests but
 		// only i delays; adding the pending delay makes it i+1 full cycles and keeps the ETA stable.
@@ -291,7 +316,7 @@ async function rankByDemand(candidates, cache) {
 		const failures = Object.keys(failureCounts).length ? ` | failures: ${JSON.stringify(failureCounts)}` : '';
 		console.log(`${prefix} | ${detail} | ${qualifiedSoFar} qualified | elapsed ${formatDuration(elapsedMs)} | ETA ${formatDuration(etaMs)}${failures}`);
 
-		await new Promise((resolve) => setTimeout(resolve, PRICEOVERVIEW_DELAY_MS));
+		await new Promise((resolve) => setTimeout(resolve, jitteredDelayMs()));
 	}
 
 	saveCache(cache);
@@ -383,6 +408,12 @@ async function main() {
 		return;
 	}
 
+	if (FROM_CACHE && !cache.candidates) {
+		console.error('--from-cache needs a cache with stage 1 candidates, but none was found; run without it first.');
+		process.exitCode = 1;
+		return;
+	}
+
 	if (cache.candidates) {
 		candidates = cache.candidates;
 		console.log(`Stage 1: reusing ${candidates.length} cached candidates (delete ${CACHE_FILE} to force a fresh scan).`);
@@ -394,17 +425,28 @@ async function main() {
 		saveCache(cache);
 	}
 
-	console.log('Stage 2: fetching real sales volume per candidate (this takes a while)...');
-	const stoppedEarly = await rankByDemand(candidates, cache);
-	if (stoppedEarly) {
-		console.log('Not writing items.json from a partial run — it still has the previous pool.');
-		return;
+	let stoppedEarly = false;
+	if (FROM_CACHE) {
+		console.log('Stage 2: skipped (--from-cache) — using already-resolved volumes from the cache.');
+	} else {
+		console.log('Stage 2: fetching real sales volume per candidate (this takes a while)...');
+		stoppedEarly = await rankByDemand(candidates, cache);
 	}
 
-	const ranked = Object.values(cache.resolved);
-	console.log(`Stage 2 done: ${ranked.length} candidates have usable price/volume data.`);
-
+	// The cache also holds entries resolved under earlier filters (Souvenir, wider price band),
+	// so re-apply the current rules here rather than trusting that everything cached is eligible.
+	const ranked = Object.values(cache.resolved).filter((item) => isEligible(item.name, item.price_paise));
 	const qualified = ranked.filter((item) => (item.volume ?? 0) >= MIN_VOLUME);
+	if (stoppedEarly && qualified.length < MIN_QUALIFIED_TO_WRITE) {
+		console.log(`Not writing items.json from a partial run (${qualified.length} qualified, need ${MIN_QUALIFIED_TO_WRITE}) — it still has the previous pool.`);
+		return;
+	}
+	if (stoppedEarly) {
+		console.log(`Stage 2 cut short, but ${qualified.length} candidates already qualify (>= ${MIN_QUALIFIED_TO_WRITE}) — writing the pool anyway.`);
+		process.exitCode = 0;
+	}
+
+	console.log(`Stage 2 done: ${ranked.length} candidates have usable price/volume data.`);
 	console.log(`${qualified.length}/${ranked.length} candidates clear the MIN_VOLUME (${MIN_VOLUME}) floor.`);
 
 	qualified.sort((a, b) => b.volume - a.volume);

@@ -27,7 +27,7 @@ A Node.js bot that places lowballed buy orders across liquid Counter-Strike 2 we
 
 ## How it works
 
-1. `selectPilotItems.js` finds liquid weapon skins (excluding knives/gloves/cases/stickers) above a price floor, then ranks them by real recent sales volume (not just listing count, which favors oversupplied-but-unwanted items) — the goal is maximizing fill probability, not payoff size per fill.
+1. `selectPilotItems.js` finds liquid weapon skins (excluding knives/gloves/cases/stickers and Souvenir items) priced between ₹25 and ₹500, then ranks them by real recent sales volume (not just listing count, which favors oversupplied-but-unwanted items) — the goal is maximizing fill probability, not payoff size per fill.
 2. `index.js` takes the top unplaced items from that ranked pool and places a buy order for each at a fixed discount off the current lowest price, with a hard safety guard that refuses any order that isn't strictly below the live lowest price.
 3. `cancelAllBuyOrders.js` cancels everything in one pass when you want to refresh.
 
