@@ -138,6 +138,25 @@ async function fetchSearchPage(cookieString, start) {
 	return JSON.parse(body);
 }
 
+// A dropped connection (seen once as ECONNRESET at the start of stage 1, with Steam reachable
+// again moments later) shouldn't throw away a scan. Retries cover connection-level errors
+// only — never HTTP 429 or the rate-limit error, where calling again would extend a ban.
+const TRANSIENT_NETWORK_CODES = new Set(['ECONNRESET', 'ETIMEDOUT', 'ECONNABORTED', 'EPIPE']);
+const STAGE1_RETRY_DELAYS_MS = [10000, 30000];
+
+async function fetchSearchPageWithRetry(cookieString, start) {
+	for (let attempt = 0; ; attempt++) {
+		try {
+			return await fetchSearchPage(cookieString, start);
+		} catch (err) {
+			const delay = STAGE1_RETRY_DELAYS_MS[attempt];
+			if (!TRANSIENT_NETWORK_CODES.has(err.code) || delay === undefined) throw err;
+			console.log(`  [stage 1] ${err.code} at start=${start}; retrying in ${delay / 1000}s (retry ${attempt + 1}/${STAGE1_RETRY_DELAYS_MS.length})...`);
+			await new Promise((resolve) => setTimeout(resolve, delay));
+		}
+	}
+}
+
 // Stage 1 (cheap, bulk): scan listings sorted by quantity to gather a broad pool of
 // liquid weapon skins above the price floor. This is just a first-pass net — listing
 // count reflects order-book supply, not actual demand (an unwanted item can have huge
@@ -150,7 +169,7 @@ async function gatherCandidates(cookieString) {
 	let totalCount = null;
 	let requests = 0;
 	for (let page = 0; page < MAX_STAGE1_PAGES; page++) {
-		const data = await fetchSearchPage(cookieString, start);
+		const data = await fetchSearchPageWithRetry(cookieString, start);
 		requests++;
 		if (!data.success || !data.results?.length) break;
 		if (totalCount === null) {
