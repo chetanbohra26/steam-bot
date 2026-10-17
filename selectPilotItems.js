@@ -85,6 +85,17 @@ const REQUEST_OVERHEAD_MS = 350; // measured: ~6.35s per item at a 6000ms delay
 // runs, so a rate-limit hit doesn't force starting over from zero — a retry only queries
 // priceoverview for candidates not yet resolved. Delete this file to force a fresh scan.
 const CACHE_FILE = './pickItemsCache.json';
+// Cached stage-1 candidates are reused only for this long — long enough that a weekly refresh
+// spread over several runs (a cap or rate-limit stop, then a follow-up over the weekend) keeps
+// one candidate list; after that a run rescans stage 1 so new releases and moved prices show up.
+// The tradeoff: a reused list's stage-1 prices are as old as the list (run pick-items-priceonly
+// before placing orders if that matters).
+const CANDIDATES_TTL_MS = 4 * 24 * 60 * 60 * 1000;
+// A resolved volume older than this is re-fetched (oldest first, new candidates before stale ones).
+const RESOLVED_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+// Hard cap on priceoverview calls per run — both known bans hit at ~585 calls, so stop well short
+// and let the next run carry on. Whatever is left stays queued (stale entries keep their old volume).
+const MAX_CALLS_PER_RUN = 450;
 const CACHE_STAGE1_VERSION = 3; // bump whenever stage 1's candidate selection changes; v2 = paging fix (2026-10-04), v3 = Rs25-500 band + no Souvenir (2026-10-11)
 
 // --price-only: run stage 1 only and use its sell_price (already fetched for the
@@ -117,22 +128,30 @@ function loadPlacedOrders() {
 }
 
 function loadCache() {
-	if (!fs.existsSync(CACHE_FILE)) return { candidates: null, resolved: {} };
+	if (!fs.existsSync(CACHE_FILE)) return { candidates: null, candidatesAt: null, resolved: {} };
 	try {
 		const raw = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf8'));
 		const resolved = raw.resolved || {};
+		// Entries saved before fetch times were recorded get the cache file's modified time, so they
+		// start aging from now instead of all counting as instantly stale (which would queue ~1000
+		// re-fetches at once).
+		const legacyStamp = fs.statSync(CACHE_FILE).mtime.toISOString();
+		for (const entry of Object.values(resolved)) {
+			if (!entry.fetchedAt) entry.fetchedAt = legacyStamp;
+		}
 		// Candidate lists from before the paging fix came from a ~10% sample of the market, so
 		// drop them. Resolved price/volume entries are per-item facts and stay valid.
 		if (raw.stage1Version !== CACHE_STAGE1_VERSION) {
 			if (raw.candidates) {
 				console.log(`Cache: discarding ${raw.candidates.length} stage-1 candidates picked under an older scan/filter version; keeping ${Object.keys(resolved).length} already-resolved volumes.`);
 			}
-			return { candidates: null, resolved };
+			return { candidates: null, candidatesAt: null, resolved };
 		}
-		return { candidates: raw.candidates || null, resolved };
+		// A candidate list with no scan time predates the TTL, so its age is unknown — treated as expired.
+		return { candidates: raw.candidates || null, candidatesAt: raw.candidatesAt || null, resolved };
 	} catch (err) {
 		console.error('Failed to read cache, starting fresh:', err.message);
-		return { candidates: null, resolved: {} };
+		return { candidates: null, candidatesAt: null, resolved: {} };
 	}
 }
 
@@ -251,8 +270,20 @@ async function rankByDemand(candidates, cache) {
 	const failureCounts = {};
 	let newlyResolved = 0;
 
-	const remaining = candidates.filter((c) => !cache.resolved[c.market_hash_name]);
-	console.log(`  [stage 2] ${remaining.length}/${candidates.length} candidates still need resolving (${candidates.length - remaining.length} already cached).`);
+	// New candidates first (they can't be ranked without a volume), then stale ones oldest-first;
+	// the per-run cap keeps whatever doesn't fit queued for the next run.
+	const resolvedAgeMs = (c) => Date.now() - Date.parse(cache.resolved[c.market_hash_name].fetchedAt);
+	const unresolved = candidates.filter((c) => !cache.resolved[c.market_hash_name]);
+	const stale = candidates
+		.filter((c) => cache.resolved[c.market_hash_name] && resolvedAgeMs(c) >= RESOLVED_TTL_MS)
+		.sort((a, b) => resolvedAgeMs(b) - resolvedAgeMs(a));
+	const queue = [...unresolved, ...stale];
+	const remaining = queue.slice(0, MAX_CALLS_PER_RUN);
+	const deferred = queue.length - remaining.length;
+	console.log(
+		`  [stage 2] ${queue.length}/${candidates.length} candidates need a volume fetch (${unresolved.length} new, ${stale.length} older than ${RESOLVED_TTL_MS / 86400000} days; ${candidates.length - queue.length} fresh in cache).` +
+			(deferred ? ` Fetching ${remaining.length} this run (cap ${MAX_CALLS_PER_RUN}); ${deferred} deferred to the next run.` : ''),
+	);
 	const perItemMs = PRICEOVERVIEW_DELAY_MS + REQUEST_OVERHEAD_MS;
 	console.log(`  [stage 2] pacing ${PRICEOVERVIEW_DELAY_MS / 1000}s delay -> ~${Math.round(3600000 / perItemMs)} calls/hour, estimated ${formatDuration(remaining.length * perItemMs)} for ${remaining.length} item(s).`);
 	const poolPriceByName = new Map(allItems.map((p) => [p.market_hash_name, p.price_paise]));
@@ -274,6 +305,7 @@ async function rankByDemand(candidates, cache) {
 						...item,
 						price_paise: pricePaise,
 						volume,
+						fetchedAt: new Date().toISOString(),
 					};
 					newlyResolved++;
 
@@ -321,6 +353,9 @@ async function rankByDemand(candidates, cache) {
 
 	saveCache(cache);
 	console.log(`  [stage 2] final failure breakdown: ${JSON.stringify(failureCounts)}`);
+	if (deferred) {
+		console.log(`  [stage 2] call cap reached — ${deferred} candidate(s) still need a fresh volume. They keep their saved volume for now; re-run pick-items in a few hours or tomorrow to finish them.`);
+	}
 	return false;
 }
 
@@ -414,14 +449,22 @@ async function main() {
 		return;
 	}
 
-	if (cache.candidates) {
+	const candidateAgeMs = cache.candidatesAt ? Date.now() - Date.parse(cache.candidatesAt) : Infinity;
+	// --from-cache never touches the market, so it uses whatever candidates are saved, however old.
+	if (cache.candidates && (candidateAgeMs < CANDIDATES_TTL_MS || FROM_CACHE)) {
 		candidates = cache.candidates;
-		console.log(`Stage 1: reusing ${candidates.length} cached candidates (delete ${CACHE_FILE} to force a fresh scan).`);
+		const age = Number.isFinite(candidateAgeMs) ? `${(candidateAgeMs / 3600000).toFixed(1)}h old` : 'age unknown';
+		console.log(`Stage 1: reusing ${candidates.length} cached candidates (${age}; rescans after ${CANDIDATES_TTL_MS / 86400000} days).`);
 	} else {
+		if (cache.candidates) {
+			const age = Number.isFinite(candidateAgeMs) ? `${(candidateAgeMs / 3600000).toFixed(1)}h old` : 'age unknown';
+			console.log(`Stage 1: cached candidates are expired (${age}); rescanning.`);
+		}
 		console.log('Stage 1: gathering liquid weapon-skin candidates by listing volume...');
 		candidates = await gatherCandidates(cookieString);
 		console.log(`Stage 1 done: ${candidates.length} candidates.`);
 		cache.candidates = candidates;
+		cache.candidatesAt = new Date().toISOString();
 		saveCache(cache);
 	}
 
@@ -433,9 +476,21 @@ async function main() {
 		stoppedEarly = await rankByDemand(candidates, cache);
 	}
 
-	// The cache also holds entries resolved under earlier filters (Souvenir, wider price band),
-	// so re-apply the current rules here rather than trusting that everything cached is eligible.
-	const ranked = Object.values(cache.resolved).filter((item) => isEligible(item.name, item.price_paise));
+	// The cache also holds entries resolved under earlier filters and for items that have since
+	// dropped out of the candidate list, so build the pool only from current candidates and
+	// re-apply the current rules. A candidate's volume comes from the cache, but its price is
+	// whichever is newer: the stage-1 price from this candidate scan, or the priceoverview price
+	// fetched later than it. (Previously the cached priceoverview price won even when it was
+	// days older than the stage-1 scan.)
+	const candidateByName = new Map(candidates.map((c) => [c.market_hash_name, c]));
+	const scannedAtMs = Date.parse(cache.candidatesAt) || 0;
+	const ranked = [];
+	for (const [name, entry] of Object.entries(cache.resolved)) {
+		const candidate = candidateByName.get(name);
+		if (!candidate) continue;
+		const pricePaise = Date.parse(entry.fetchedAt) >= scannedAtMs ? entry.price_paise : candidate.price_paise;
+		if (isEligible(entry.name, pricePaise)) ranked.push({ ...entry, price_paise: pricePaise });
+	}
 	const qualified = ranked.filter((item) => (item.volume ?? 0) >= MIN_VOLUME);
 	if (stoppedEarly && qualified.length < MIN_QUALIFIED_TO_WRITE) {
 		console.log(`Not writing items.json from a partial run (${qualified.length} qualified, need ${MIN_QUALIFIED_TO_WRITE}) — it still has the previous pool.`);
