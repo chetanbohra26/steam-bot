@@ -109,6 +109,7 @@ const SKIP_STAGE2 = process.argv.includes('--price-only');
 const NOTABLE_PCT_CHANGE = 20; // flag price moves at least this big, e.g. the P90 | Neoqueen crash (~41% in days) that prompted this
 const PLACED_ORDERS_FILE = './placedOrders.json';
 const ORDER_ADJUSTMENTS_FILE = './buyOrderAdjustments.json';
+const ORDER_BIDS_FILE = './orderBids.json'; // written by index.js: { name: { ref_price_paise, bid_paise, placedAt } }
 const DISCOUNT_FACTOR = 0.60; // matches index.js — only used here to compute suggested buy-order prices for the adjustment report, not to place anything
 
 function formatDuration(ms) {
@@ -124,6 +125,15 @@ function loadPlacedOrders() {
 		return new Set(JSON.parse(fs.readFileSync(PLACED_ORDERS_FILE, 'utf8')));
 	} catch {
 		return new Set();
+	}
+}
+
+function loadOrderBids() {
+	if (!fs.existsSync(ORDER_BIDS_FILE)) return {};
+	try {
+		return JSON.parse(fs.readFileSync(ORDER_BIDS_FILE, 'utf8'));
+	} catch {
+		return {};
 	}
 }
 
@@ -362,15 +372,18 @@ async function rankByDemand(candidates, cache) {
 // Updates items.json's cached price for every pool item found in this stage-1 scan —
 // volume is left as-is (stage 1 doesn't measure it). Items not found in this scan (fell
 // out of the top-liquidity ranking) are left unchanged rather than guessed at. Also
-// writes buyOrderAdjustments.json: for items with an ACTIVE buy order (per
-// placedOrders.json) whose price moved notably since the order was computed, lists the
-// old vs. new reference price and the old vs. suggested-new buy-order price, so you can
-// decide whether to cancel+replace that specific order — doesn't touch any order itself.
-// Relies on items.json's price_paise still reflecting the price last used to compute
-// that order (true as long as no other refresh ran in between without a re-placement).
+// writes buyOrderAdjustments.json: for every ACTIVE buy order (per placedOrders.json)
+// whose price moved notably since the order was computed, lists the old vs. new reference
+// price and the old vs. suggested-new buy-order price, so you can decide whether to
+// cancel+replace that specific order — doesn't touch any order itself. The baseline is the
+// reference price recorded when the order was placed (orderBids.json); orders without a
+// record fall back to the pool's price from before this scan, which is only right until
+// the pool's price gets refreshed.
 function applyStage1PricesToPool(candidates) {
 	const priceByName = new Map(candidates.map((c) => [c.market_hash_name, c.price_paise]));
+	const poolPriceBefore = new Map(allItems.map((item) => [item.market_hash_name, item.price_paise]));
 	const placedOrders = loadPlacedOrders();
+	const orderBids = loadOrderBids();
 	let updated = 0;
 	let missing = 0;
 	const notableMoves = [];
@@ -389,21 +402,38 @@ function applyStage1PricesToPool(candidates) {
 				const pctChange = ((newPrice - oldPrice) / oldPrice) * 100;
 				if (Math.abs(pctChange) >= NOTABLE_PCT_CHANGE) {
 					notableMoves.push({ name: item.name, oldPrice, newPrice, pctChange });
-					if (placedOrders.has(item.market_hash_name)) {
-						orderAdjustments.push({
-							market_hash_name: item.market_hash_name,
-							name: item.name,
-							oldPrice_paise: oldPrice,
-							oldBuyOrderPrice_paise: Math.floor(oldPrice * DISCOUNT_FACTOR),
-							newPrice_paise: newPrice,
-							suggestedBuyOrderPrice_paise: Math.floor(newPrice * DISCOUNT_FACTOR),
-							pctChange: Math.round(pctChange * 10) / 10,
-						});
-					}
 				}
 			}
 			item.price_paise = newPrice;
 		}
+	}
+
+	let ordersWithoutRecord = 0;
+	let ordersNotInScan = 0;
+	for (const name of placedOrders) {
+		const newPrice = priceByName.get(name);
+		if (newPrice === undefined) {
+			ordersNotInScan++;
+			continue;
+		}
+		const record = orderBids[name];
+		const refPrice = record?.ref_price_paise ?? poolPriceBefore.get(name);
+		if (!record) ordersWithoutRecord++;
+		if (!Number.isFinite(refPrice) || refPrice <= 0) continue;
+		const pctChange = ((newPrice - refPrice) / refPrice) * 100;
+		if (Math.abs(pctChange) < NOTABLE_PCT_CHANGE) continue;
+		const bid = record?.bid_paise ?? Math.floor(refPrice * DISCOUNT_FACTOR);
+		orderAdjustments.push({
+			market_hash_name: name,
+			name: allItems.find((item) => item.market_hash_name === name)?.name ?? name,
+			oldPrice_paise: refPrice,
+			oldBuyOrderPrice_paise: bid,
+			newPrice_paise: newPrice,
+			suggestedBuyOrderPrice_paise: Math.floor(newPrice * DISCOUNT_FACTOR),
+			bidShareOfNewPrice: Math.round((bid / newPrice) * 100),
+			pctChange: Math.round(pctChange * 10) / 10,
+			baseline: record ? 'recorded at placement' : 'pool price (no record)',
+		});
 	}
 
 	fs.writeFileSync('./items.json', JSON.stringify(allItems, null, '\t') + '\n');
@@ -424,6 +454,8 @@ function applyStage1PricesToPool(candidates) {
 	} else {
 		console.log(`\nNo active buy orders moved ${NOTABLE_PCT_CHANGE}%+ — wrote empty ${ORDER_ADJUSTMENTS_FILE}.`);
 	}
+	if (ordersNotInScan) console.log(`${ordersNotInScan} active order(s) weren't in this scan, so their price couldn't be checked.`);
+	if (ordersWithoutRecord) console.log(`${ordersWithoutRecord} active order(s) have no recorded placement price (${ORDER_BIDS_FILE}); the pool's earlier price was used as their baseline.`);
 }
 
 async function main() {
@@ -439,6 +471,12 @@ async function main() {
 		console.log('Stage 1: gathering current prices (--price-only, ignoring any cached candidates)...');
 		candidates = await gatherCandidates(cookieString);
 		console.log(`Stage 1 done: ${candidates.length} candidates.`);
+		// This is the same scan a full run starts with, so keep it: a pick-items run within the TTL
+		// reuses it instead of repeating ~260 search requests.
+		cache.candidates = candidates;
+		cache.candidatesAt = new Date().toISOString();
+		saveCache(cache);
+		console.log(`Saved the candidate list to ${CACHE_FILE} for pick-items to reuse (valid ${CANDIDATES_TTL_MS / 86400000} days).`);
 		applyStage1PricesToPool(candidates);
 		return;
 	}

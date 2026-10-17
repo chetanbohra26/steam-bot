@@ -5,6 +5,7 @@ const { getMyBuyOrderIds, cancelBuyOrder } = require('./market');
 const BATCH_SIZE = 5;
 const DELAY_BETWEEN_BATCHES_MS = 3000; // widened from 10/1000ms — no confirmed evidence cancelbuyorder is exempt from the same shared per-IP market rate limit that banned a priceoverview run at just ~14/min
 const PLACED_ORDERS_FILE = './placedOrders.json';
+const ORDER_BIDS_FILE = './orderBids.json'; // per-order reference price and bid, written by index.js
 
 function chunk(array, size) {
 	const chunks = [];
@@ -55,7 +56,8 @@ async function main() {
 		const remaining = await getMyBuyOrderIds();
 		if (remaining.length === 0) {
 			fs.writeFileSync(PLACED_ORDERS_FILE, '[]');
-			console.log('Verified 0 active buy orders remain — cleared placedOrders.json.');
+			fs.writeFileSync(ORDER_BIDS_FILE, '{}');
+			console.log('Verified 0 active buy orders remain — cleared placedOrders.json and orderBids.json.');
 		} else {
 			console.log(
 				`All cancels reported success, but ${remaining.length} buy order(s) still show as active (${remaining.join(', ')}) — leaving placedOrders.json as-is.`,

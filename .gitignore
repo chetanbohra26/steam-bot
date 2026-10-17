@@ -5,3 +5,4 @@ pickItemsCache.json
 placedOrders.json
 priceHistory.jsonl
 buyOrderAdjustments.json
+orderBids.json

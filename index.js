@@ -11,6 +11,10 @@ const LIMIT = 500; // pool currently has 365 qualified items (below this), so th
 // price-cache refresh below) shows whether this cushion is over/under-sized.
 const DISCOUNT_FACTOR = 0.60;
 const PLACED_ORDERS_FILE = './placedOrders.json';
+// What each active order was actually based on: { market_hash_name: { ref_price_paise, bid_paise, placedAt } }.
+// pick-items-priceonly compares fresh prices against ref_price_paise, since items.json's own price gets
+// overwritten by every refresh and so can't serve as the baseline. cancelAllBuyOrders.js clears it with placedOrders.json.
+const ORDER_BIDS_FILE = './orderBids.json';
 const PRICE_HISTORY_FILE = './priceHistory.jsonl';
 // --cached: skip the live priceoverview fetch per item and buy off items.json's cached
 // price/volume instead. Useful right after a pick-items run, whose data is already
@@ -30,6 +34,19 @@ function loadPlacedOrders() {
 
 function savePlacedOrders(set) {
 	fs.writeFileSync(PLACED_ORDERS_FILE, JSON.stringify([...set], null, '\t'));
+}
+
+function loadOrderBids() {
+	if (!fs.existsSync(ORDER_BIDS_FILE)) return {};
+	try {
+		return JSON.parse(fs.readFileSync(ORDER_BIDS_FILE, 'utf8'));
+	} catch {
+		return {};
+	}
+}
+
+function saveOrderBids(bids) {
+	fs.writeFileSync(ORDER_BIDS_FILE, JSON.stringify(bids, null, '\t'));
 }
 
 function saveItemsPool() {
@@ -63,6 +80,7 @@ function appendPriceHistory(item, pricePaise, volume) {
 // by a previous run, preserving that rank order, rather than re-sorting by price:
 // fill-probability is the priority here, not affordability.
 const placedOrders = loadPlacedOrders();
+const orderBids = loadOrderBids();
 const items = allItems.filter((item) => !placedOrders.has(item.market_hash_name)).slice(0, LIMIT);
 
 async function processItem(item) {
@@ -147,6 +165,10 @@ async function startBot() {
 			if (placedPricePaise) {
 				placedOrders.add(item.market_hash_name);
 				savePlacedOrders(placedOrders);
+				// processItem leaves item.price_paise equal to the reference price this bid was computed from
+				// (cached mode reads it; live mode overwrites it with the fetched lowest price).
+				orderBids[item.market_hash_name] = { ref_price_paise: item.price_paise, bid_paise: placedPricePaise, placedAt: new Date().toISOString() };
+				saveOrderBids(orderBids);
 				if (knownHeadroomPaise !== Infinity) {
 					knownHeadroomPaise -= placedPricePaise; // actual price paid, not the cached estimate
 				}
