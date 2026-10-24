@@ -39,7 +39,7 @@ A Node.js bot that places lowballed buy orders across liquid Counter-Strike 2 we
 ## Security
 
 - Credentials load from `.env` (gitignored); the password is base64-encoded, not plaintext.
-- Steam Guard 2FA is entered interactively at login — there's no stored TOTP secret.
+- Login: when the saved session expires the bot first tries to renew it from a saved refresh token (`refreshToken.json`, gitignored) with no input at all. If that fails it shows a QR code in the terminal; scan it with the Steam mobile app (Steam Guard tab -> "Scan a QR code") and approve. The QR path never reads your username or password, so `STEAM_USERNAME` / `STEAM_PASSWORD` can be removed from `.env`. A QR login saves a fresh refresh token, so you only need to scan again when Steam expires it (months). `refreshToken.json` is as sensitive as `session.json`: anyone who can read it can act as your Steam account on the website. The old username + password + typed Steam Guard code login is still available with `--password-login` (e.g. `node index.js --password-login`) or `STEAM_LOGIN_METHOD=password`.
 
 ## Disclaimer
 

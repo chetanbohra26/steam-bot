@@ -6,3 +6,4 @@ placedOrders.json
 priceHistory.jsonl
 buyOrderAdjustments.json
 orderBids.json
+refreshToken.json
