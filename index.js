@@ -139,17 +139,20 @@ async function processItem(item) {
 	return priceInSmallestUnit;
 }
 
+const { formatDuration, progressSuffix } = require('./progress');
+
 async function startBot() {
 	await login();
 	console.log(`Pool: ${allItems.length} item(s), ${placedOrders.size} already placed. Processing the top ${items.length} unplaced by trade volume.`);
 
+	const loopStartedAt = Date.now();
 	let knownHeadroomPaise = Infinity; // set once we've actually hit the 10x-wallet ceiling
 	let skippedForBudget = 0;
 	let stoppedForRateLimit = false;
 
 	for (let i = 0; i < items.length; i++) {
 		const item = items[i];
-		console.log(`\n[${i + 1}/${items.length}]`);
+		console.log(`\n[${i + 1}/${items.length}] ${progressSuffix(loopStartedAt, i, items.length)}`);
 
 		// Once we know the remaining headroom, skip items whose cached price already
 		// won't fit, without spending an API call/rate-limit budget to find out live.
@@ -193,7 +196,7 @@ async function startBot() {
 		process.exitCode = 1;
 		return;
 	}
-	console.log(`\nDone — processed ${items.length} item(s), ${skippedForBudget} skipped due to the active-orders ceiling.`);
+	console.log(`\nDone in ${formatDuration(Date.now() - loopStartedAt)} — processed ${items.length} item(s), ${skippedForBudget} skipped due to the active-orders ceiling.`);
 }
 
 startBot().catch(console.error);

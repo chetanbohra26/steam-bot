@@ -1,5 +1,6 @@
 const fs = require('fs');
 const { login } = require('./auth');
+const { formatDuration, progressSuffix } = require('./progress');
 const { getMyBuyOrderIds, cancelBuyOrder } = require('./market');
 
 const BATCH_SIZE = 5;
@@ -24,6 +25,7 @@ async function main() {
 	const batches = chunk(ids, BATCH_SIZE);
 	let cancelled = 0;
 	let failed = 0;
+	const startedAt = Date.now();
 
 	for (let b = 0; b < batches.length; b++) {
 		const batch = batches[b];
@@ -39,12 +41,13 @@ async function main() {
 			}
 		});
 
+		console.log(`  [batch ${b + 1}/${batches.length}] ${cancelled + failed}/${ids.length} processed | ${progressSuffix(startedAt, b + 1, batches.length)}`);
 		if (b < batches.length - 1) {
 			await new Promise((resolve) => setTimeout(resolve, DELAY_BETWEEN_BATCHES_MS));
 		}
 	}
 
-	console.log(`\nDone — ${cancelled} cancelled, ${failed} failed, out of ${ids.length}.`);
+	console.log(`\nDone in ${formatDuration(Date.now() - startedAt)} — ${cancelled} cancelled, ${failed} failed, out of ${ids.length}.`);
 
 	// index.js tracks which items already have an order in placedOrders.json so it can
 	// skip them on future runs. Since this cancels every active order, that tracking is
