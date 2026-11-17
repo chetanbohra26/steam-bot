@@ -92,10 +92,11 @@ const CACHE_FILE = './pickItemsCache.json';
 // before placing orders if that matters).
 const CANDIDATES_TTL_MS = 4 * 24 * 60 * 60 * 1000;
 // A resolved volume older than this is re-fetched (oldest first, new candidates before stale ones).
-const RESOLVED_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-// Hard cap on priceoverview calls per run — both known bans hit at ~585 calls, so stop well short
+const RESOLVED_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+// Hard cap on priceoverview calls per run — the first three bans hit at ~585 calls, but on 2026-11-17 two
+// separate runs (home server, then this PC ~6h later) both got a 429 on call 167, so stop well short at 150
 // and let the next run carry on. Whatever is left stays queued (stale entries keep their old volume).
-const MAX_CALLS_PER_RUN = 450;
+const MAX_CALLS_PER_RUN = 150;
 const CACHE_STAGE1_VERSION = 3; // bump whenever stage 1's candidate selection changes; v2 = paging fix (2026-10-04), v3 = Rs25-500 band + no Souvenir (2026-10-11)
 
 // --price-only: run stage 1 only and use its sell_price (already fetched for the
