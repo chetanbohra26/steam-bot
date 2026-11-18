@@ -139,9 +139,11 @@ async function submitBuyOrder(body, headers) {
 }
 
 // Fetches the "My listings" page (which server-renders both sell listings and buy
-// orders) and pulls out the buy_orderid of every active buy order from the
-// CancelMarketBuyOrder( '<id>' ) onclick handlers embedded in its HTML.
-async function getMyBuyOrderIds() {
+// orders) and parses out every active buy order's id, item name, and currently-bid
+// price from the mybuyorder_<id> rows in its HTML — this is the live source of truth
+// for what's active on Steam, independent of (and able to catch drift from) local
+// tracking files like placedOrders.json/orderBids.json.
+async function getMyBuyOrders() {
 	const { cookieString } = getSession();
 	const { body } = await httpsRequest({
 		hostname: 'steamcommunity.com',
@@ -156,8 +158,27 @@ async function getMyBuyOrderIds() {
 	});
 	const data = JSON.parse(body);
 	const html = data.results_html || '';
-	const ids = [...html.matchAll(/CancelMarketBuyOrder\(\s*'(\d+)'\s*\)/g)].map((m) => m[1]);
-	return [...new Set(ids)];
+
+	const orders = [];
+	const seen = new Set();
+	for (const row of html.split('market_listing_row market_recent_listing_row').slice(1)) {
+		const idMatch = /id="mybuyorder_(\d+)"/.exec(row);
+		// Steam omits the decimal point for whole-rupee prices (e.g. "₹ 33" not "₹ 33.00").
+		const priceMatch = /₹\s*([\d,]+(?:\.\d+)?)/.exec(row);
+		const nameMatch = /class="market_listing_item_name_link"[^>]*>([^<]+)</.exec(row);
+		if (!idMatch || !priceMatch || !nameMatch || seen.has(idMatch[1])) continue;
+		seen.add(idMatch[1]);
+		orders.push({
+			id: idMatch[1],
+			name: nameMatch[1].trim(),
+			bidPaise: Math.round(parseFloat(priceMatch[1].replace(/,/g, '')) * 100),
+		});
+	}
+	return orders;
+}
+
+async function getMyBuyOrderIds() {
+	return (await getMyBuyOrders()).map((o) => o.id);
 }
 
 async function cancelBuyOrder(buy_orderid) {
@@ -187,4 +208,4 @@ async function cancelBuyOrder(buy_orderid) {
 	}
 }
 
-module.exports = { getPriceOverview, createBuyOrder, getMyBuyOrderIds, cancelBuyOrder, getSession, httpsRequest };
+module.exports = { getPriceOverview, createBuyOrder, getMyBuyOrders, getMyBuyOrderIds, cancelBuyOrder, getSession, httpsRequest };

@@ -2,9 +2,8 @@ const fs = require('fs');
 const { login } = require('./auth');
 const { formatDuration, progressSuffix } = require('./progress');
 const { getMyBuyOrderIds, cancelBuyOrder } = require('./market');
+const { BATCH_SIZE, DELAY_BETWEEN_BATCHES_MS } = require('./buyOrderRisk'); // same pace as cancelRiskyBuyOrders.js — widened from 10/1000ms since there's no confirmed evidence cancelbuyorder is exempt from the same shared per-IP market rate limit that banned a priceoverview run at just ~14/min
 
-const BATCH_SIZE = 5;
-const DELAY_BETWEEN_BATCHES_MS = 3000; // widened from 10/1000ms — no confirmed evidence cancelbuyorder is exempt from the same shared per-IP market rate limit that banned a priceoverview run at just ~14/min
 const PLACED_ORDERS_FILE = './placedOrders.json';
 const ORDER_BIDS_FILE = './orderBids.json'; // per-order reference price and bid, written by index.js
 

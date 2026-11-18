@@ -1,5 +1,6 @@
 const { login } = require('./auth');
 const { getSession, httpsRequest, getPriceOverview } = require('./market');
+const { findRiskyOrders, cancelRiskyOrders } = require('./buyOrderRisk');
 const fs = require('fs');
 const allItems = require('./items.json');
 
@@ -112,6 +113,13 @@ const PLACED_ORDERS_FILE = './placedOrders.json';
 const ORDER_ADJUSTMENTS_FILE = './buyOrderAdjustments.json';
 const ORDER_BIDS_FILE = './orderBids.json'; // written by index.js: { name: { ref_price_paise, bid_paise, placedAt } }
 const DISCOUNT_FACTOR = 0.60; // matches index.js — only used here to compute suggested buy-order prices for the adjustment report, not to place anything
+// Stage 1 only scans a few thousand of the ~12,400 weapon listings before it hits its
+// 1000-candidate cap, so pool items with lower current liquidity can fall outside what
+// got scanned and come back "missing" rather than priced. Worth an individual
+// priceoverview call per item (same call stage 2 makes) when there are only a handful —
+// not worth it, and not worth the added run time, when a lot fell out at once (more
+// likely a real ranking shift than scan luck).
+const MAX_MANUAL_FETCH = 50;
 
 function formatDuration(ms) {
 	const totalSeconds = Math.max(0, Math.round(ms / 1000));
@@ -380,20 +388,20 @@ async function rankByDemand(candidates, cache) {
 // reference price recorded when the order was placed (orderBids.json); orders without a
 // record fall back to the pool's price from before this scan, which is only right until
 // the pool's price gets refreshed.
-function applyStage1PricesToPool(candidates) {
+async function applyStage1PricesToPool(candidates) {
 	const priceByName = new Map(candidates.map((c) => [c.market_hash_name, c.price_paise]));
 	const poolPriceBefore = new Map(allItems.map((item) => [item.market_hash_name, item.price_paise]));
 	const placedOrders = loadPlacedOrders();
 	const orderBids = loadOrderBids();
 	let updated = 0;
-	let missing = 0;
 	const notableMoves = [];
 	const orderAdjustments = [];
+	const missingItems = [];
 
 	for (const item of allItems) {
 		const newPrice = priceByName.get(item.market_hash_name);
 		if (newPrice === undefined) {
-			missing++;
+			missingItems.push(item);
 			continue;
 		}
 		const oldPrice = item.price_paise;
@@ -406,6 +414,45 @@ function applyStage1PricesToPool(candidates) {
 				}
 			}
 			item.price_paise = newPrice;
+		}
+	}
+
+	let recovered = 0;
+	if (missingItems.length === 0) {
+		// nothing missing
+	} else if (missingItems.length > MAX_MANUAL_FETCH) {
+		console.log(`\n${missingItems.length} pool item(s) weren't in this scan — too many to fetch individually this run, left unchanged.`);
+	} else {
+		console.log(`\n${missingItems.length} pool item(s) weren't in this scan — fetching each individually (${PRICEOVERVIEW_DELAY_MS / 1000}s apart)...`);
+		const parseRupees = (s) => (s ? parseFloat(String(s).replace(/[^0-9.]/g, '')) : NaN);
+		for (let i = 0; i < missingItems.length; i++) {
+			const item = missingItems[i];
+			try {
+				const data = await getPriceOverview(item.appid, item.market_hash_name);
+				const priceRupees = parseRupees(data?.lowest_price);
+				if (!data?.success || !(priceRupees > 0)) {
+					console.log(`  [${i + 1}/${missingItems.length}] ${item.name}: no listing found, left unchanged.`);
+					continue;
+				}
+				const newPrice = Math.round(priceRupees * 100);
+				const oldPrice = item.price_paise;
+				priceByName.set(item.market_hash_name, newPrice); // so the order-adjustment pass below sees it too
+				if (data.volume) item.volume = parseInt(String(data.volume).replace(/,/g, ''), 10);
+				recovered++;
+				if (oldPrice !== newPrice) {
+					updated++;
+					if (Number.isFinite(oldPrice) && oldPrice > 0) {
+						const pctChange = ((newPrice - oldPrice) / oldPrice) * 100;
+						if (Math.abs(pctChange) >= NOTABLE_PCT_CHANGE) notableMoves.push({ name: item.name, oldPrice, newPrice, pctChange });
+					}
+					item.price_paise = newPrice;
+				}
+				console.log(`  [${i + 1}/${missingItems.length}] ${item.name}: ₹${priceRupees.toFixed(2)}`);
+			} catch (err) {
+				console.log(`  [${i + 1}/${missingItems.length}] ${item.name}: fetch failed (${err.message}), left unchanged.`);
+				if (err.message.includes('rate-limited')) break; // stop burning the ban further; remaining items stay stale this run
+			}
+			if (i < missingItems.length - 1) await new Promise((resolve) => setTimeout(resolve, jitteredDelayMs()));
 		}
 	}
 
@@ -438,7 +485,11 @@ function applyStage1PricesToPool(candidates) {
 	}
 
 	fs.writeFileSync('./items.json', JSON.stringify(allItems, null, '\t') + '\n');
-	console.log(`\n--price-only: updated price for ${updated}/${allItems.length} pool item(s) from the stage 1 scan (${missing} not found in this scan, left unchanged).`);
+	const stillMissing = missingItems.length - recovered;
+	console.log(
+		`\n--price-only: updated price for ${updated}/${allItems.length} pool item(s)` +
+			(missingItems.length ? ` (${recovered}/${missingItems.length} missing from the scan recovered via individual fetch; ${stillMissing} left unchanged).` : '.'),
+	);
 
 	if (notableMoves.length) {
 		notableMoves.sort((a, b) => a.pctChange - b.pctChange);
@@ -478,7 +529,23 @@ async function main() {
 		cache.candidatesAt = new Date().toISOString();
 		saveCache(cache);
 		console.log(`Saved the candidate list to ${CACHE_FILE} for pick-items to reuse (valid ${CANDIDATES_TTL_MS / 86400000} days).`);
-		applyStage1PricesToPool(candidates);
+		await applyStage1PricesToPool(candidates);
+
+		// Fresh prices just landed above, so this is the right moment to catch orders
+		// whose price has since dropped too far below their reference (see
+		// buyOrderRisk.js) and cancel them outright — unlike buyOrderAdjustments.json
+		// above, which only reports every 20%+ move (up or down) for manual review.
+		const { risky, totalOrders } = await findRiskyOrders(allItems);
+		console.log(`\n${totalOrders} active buy order(s) checked for risk.`);
+		if (risky.length) {
+			console.log(`${risky.length} order(s) dropped 20%+ below their reference price — cancelling:`);
+			for (const r of risky) {
+				console.log(`  ${r.name}: bid ₹${(r.bidPaise / 100).toFixed(2)} vs current ₹${(r.current / 100).toFixed(2)} (${r.pctChange.toFixed(1)}%)`);
+			}
+			await cancelRiskyOrders(risky);
+		} else {
+			console.log('No active buy orders are at risk.');
+		}
 		return;
 	}
 
