@@ -64,10 +64,16 @@ async function main() {
 			console.log(
 				`All cancels reported success, but ${remaining.length} buy order(s) still show as active (${remaining.join(', ')}) — leaving placedOrders.json as-is.`,
 			);
+			process.exitCode = 1; // stops a chained `up-noprice` from running on a half-cancelled set
 		}
 	} else {
 		console.log('Some cancellations failed — leaving placedOrders.json as-is, it may be stale for those items.');
+		process.exitCode = 1;
 	}
 }
 
-main().catch(console.error);
+// Exit non-zero on any uncaught error so n8n marks the run failed and sends the alert.
+main().catch((err) => {
+	console.error(err);
+	process.exitCode = 1;
+});

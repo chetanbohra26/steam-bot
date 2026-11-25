@@ -199,4 +199,8 @@ async function startBot() {
 	console.log(`\nDone in ${formatDuration(Date.now() - loopStartedAt)} — processed ${items.length} item(s), ${skippedForBudget} skipped due to the active-orders ceiling.`);
 }
 
-startBot().catch(console.error);
+// Exit non-zero on any uncaught error so n8n marks the run failed and sends the alert.
+startBot().catch((err) => {
+	console.error(err);
+	process.exitCode = 1;
+});

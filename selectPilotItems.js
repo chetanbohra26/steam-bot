@@ -627,4 +627,8 @@ async function main() {
 	console.log('\nWrote items.json');
 }
 
-main().catch(console.error);
+// Exit non-zero on any uncaught error so n8n marks the run failed and sends the alert.
+main().catch((err) => {
+	console.error(err);
+	process.exitCode = 1;
+});
