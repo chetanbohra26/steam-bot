@@ -1,5 +1,6 @@
 const { login } = require('./auth');
 const { getSession, httpsRequest, getPriceOverview } = require('./market');
+const { scanListings } = require('./listingScan');
 const { findRiskyOrders, cancelRiskyOrders } = require('./buyOrderRisk');
 const fs = require('fs');
 const allItems = require('./items.json');
@@ -100,27 +101,17 @@ const RESOLVED_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const MAX_CALLS_PER_RUN = 150;
 const CACHE_STAGE1_VERSION = 3; // bump whenever stage 1's candidate selection changes; v2 = paging fix (2026-10-04), v3 = Rs25-500 band + no Souvenir (2026-10-11)
 
-// --price-only: run stage 1 only and use its sell_price (already fetched for the
-// tooCheap/tooExpensive filter, just discarded before) to refresh items.json's cached
-// prices for the existing pool — no stage 2, no priceoverview calls at all. Stage 1 is
-// a handful of search/render requests (~1s apart) vs stage 2's hundreds of per-item
-// priceoverview calls (7s apart), so this is dramatically cheaper for when you just want
-// current prices and aren't expecting trade volume to have shifted much. Volume is left
-// untouched — only a full run (no flag) re-measures that.
-const SKIP_STAGE2 = process.argv.includes('--price-only');
+// --price-only: refresh the existing pool's cached price and 24h volume from market listing pages
+// (see listingScan.js) — one request per skin, no search or priceoverview calls. The pool's items
+// and their order are left as they are; only a full run (no flag) re-picks and re-ranks them.
+const PRICE_ONLY = process.argv.includes('--price-only');
+// A price-only run that leaves more than this share of the pool without a price counts as failed.
+const MAX_UNPRICED_SHARE = 0.05;
 const NOTABLE_PCT_CHANGE = 20; // flag price moves at least this big, e.g. the P90 | Neoqueen crash (~41% in days) that prompted this
 const PLACED_ORDERS_FILE = './placedOrders.json';
 const ORDER_ADJUSTMENTS_FILE = './buyOrderAdjustments.json';
 const ORDER_BIDS_FILE = './orderBids.json'; // written by index.js: { name: { ref_price_paise, bid_paise, placedAt } }
 const DISCOUNT_FACTOR = 0.60; // matches index.js — only used here to compute suggested buy-order prices for the adjustment report, not to place anything
-// Stage 1 only scans a few thousand of the ~12,400 weapon listings before it hits its
-// 1000-candidate cap, so pool items with lower current liquidity can fall outside what
-// got scanned and come back "missing" rather than priced. Worth an individual
-// priceoverview call per item (same call stage 2 makes) when there are only a handful —
-// not worth it, and not worth the added run time, when a lot fell out at once (more
-// likely a real ranking shift than scan luck).
-const MAX_MANUAL_FETCH = 50;
-
 function formatDuration(ms) {
 	const totalSeconds = Math.max(0, Math.round(ms / 1000));
 	const minutes = Math.floor(totalSeconds / 60);
@@ -378,35 +369,34 @@ async function rankByDemand(candidates, cache) {
 	return false;
 }
 
-// Updates items.json's cached price for every pool item found in this stage-1 scan —
-// volume is left as-is (stage 1 doesn't measure it). Items not found in this scan (fell
-// out of the top-liquidity ranking) are left unchanged rather than guessed at. Also
-// writes buyOrderAdjustments.json: for every ACTIVE buy order (per placedOrders.json)
-// whose price moved notably since the order was computed, lists the old vs. new reference
-// price and the old vs. suggested-new buy-order price, so you can decide whether to
-// cancel+replace that specific order — doesn't touch any order itself. The baseline is the
-// reference price recorded when the order was placed (orderBids.json); orders without a
-// record fall back to the pool's price from before this scan, which is only right until
-// the pool's price gets refreshed.
-async function applyStage1PricesToPool(candidates) {
-	const priceByName = new Map(candidates.map((c) => [c.market_hash_name, c.price_paise]));
+// Updates items.json's cached price and volume for every pool item the scan priced; the rest are
+// left unchanged rather than guessed at. Also writes buyOrderAdjustments.json: for every ACTIVE
+// buy order (per placedOrders.json) whose price moved notably since the order was computed, lists
+// the old vs. new reference price and the old vs. suggested-new buy-order price, so you can decide
+// whether to cancel+replace that specific order — doesn't touch any order itself. The baseline is
+// the reference price recorded when the order was placed (orderBids.json); orders without a record
+// fall back to the pool's price from before this scan, which is only right until the pool's price
+// gets refreshed.
+function applyScanToPool(updates) {
 	const poolPriceBefore = new Map(allItems.map((item) => [item.market_hash_name, item.price_paise]));
 	const placedOrders = loadPlacedOrders();
 	const orderBids = loadOrderBids();
-	let updated = 0;
+	let priceChanges = 0;
+	let volumeChanges = 0;
 	const notableMoves = [];
 	const orderAdjustments = [];
-	const missingItems = [];
 
 	for (const item of allItems) {
-		const newPrice = priceByName.get(item.market_hash_name);
-		if (newPrice === undefined) {
-			missingItems.push(item);
-			continue;
+		const update = updates.get(item.market_hash_name);
+		if (!update) continue;
+		if (update.volume !== undefined && update.volume !== item.volume) {
+			volumeChanges++;
+			item.volume = update.volume;
 		}
 		const oldPrice = item.price_paise;
+		const newPrice = update.price_paise;
 		if (oldPrice !== newPrice) {
-			updated++;
+			priceChanges++;
 			if (Number.isFinite(oldPrice) && oldPrice > 0) {
 				const pctChange = ((newPrice - oldPrice) / oldPrice) * 100;
 				if (Math.abs(pctChange) >= NOTABLE_PCT_CHANGE) {
@@ -417,49 +407,10 @@ async function applyStage1PricesToPool(candidates) {
 		}
 	}
 
-	let recovered = 0;
-	if (missingItems.length === 0) {
-		// nothing missing
-	} else if (missingItems.length > MAX_MANUAL_FETCH) {
-		console.log(`\n${missingItems.length} pool item(s) weren't in this scan — too many to fetch individually this run, left unchanged.`);
-	} else {
-		console.log(`\n${missingItems.length} pool item(s) weren't in this scan — fetching each individually (${PRICEOVERVIEW_DELAY_MS / 1000}s apart)...`);
-		const parseRupees = (s) => (s ? parseFloat(String(s).replace(/[^0-9.]/g, '')) : NaN);
-		for (let i = 0; i < missingItems.length; i++) {
-			const item = missingItems[i];
-			try {
-				const data = await getPriceOverview(item.appid, item.market_hash_name);
-				const priceRupees = parseRupees(data?.lowest_price);
-				if (!data?.success || !(priceRupees > 0)) {
-					console.log(`  [${i + 1}/${missingItems.length}] ${item.name}: no listing found, left unchanged.`);
-					continue;
-				}
-				const newPrice = Math.round(priceRupees * 100);
-				const oldPrice = item.price_paise;
-				priceByName.set(item.market_hash_name, newPrice); // so the order-adjustment pass below sees it too
-				if (data.volume) item.volume = parseInt(String(data.volume).replace(/,/g, ''), 10);
-				recovered++;
-				if (oldPrice !== newPrice) {
-					updated++;
-					if (Number.isFinite(oldPrice) && oldPrice > 0) {
-						const pctChange = ((newPrice - oldPrice) / oldPrice) * 100;
-						if (Math.abs(pctChange) >= NOTABLE_PCT_CHANGE) notableMoves.push({ name: item.name, oldPrice, newPrice, pctChange });
-					}
-					item.price_paise = newPrice;
-				}
-				console.log(`  [${i + 1}/${missingItems.length}] ${item.name}: ₹${priceRupees.toFixed(2)}`);
-			} catch (err) {
-				console.log(`  [${i + 1}/${missingItems.length}] ${item.name}: fetch failed (${err.message}), left unchanged.`);
-				if (err.message.includes('rate-limited')) break; // stop burning the ban further; remaining items stay stale this run
-			}
-			if (i < missingItems.length - 1) await new Promise((resolve) => setTimeout(resolve, jitteredDelayMs()));
-		}
-	}
-
 	let ordersWithoutRecord = 0;
 	let ordersNotInScan = 0;
 	for (const name of placedOrders) {
-		const newPrice = priceByName.get(name);
+		const newPrice = updates.get(name)?.price_paise;
 		if (newPrice === undefined) {
 			ordersNotInScan++;
 			continue;
@@ -485,10 +436,8 @@ async function applyStage1PricesToPool(candidates) {
 	}
 
 	fs.writeFileSync('./items.json', JSON.stringify(allItems, null, '\t') + '\n');
-	const stillMissing = missingItems.length - recovered;
 	console.log(
-		`\n--price-only: updated price for ${updated}/${allItems.length} pool item(s)` +
-			(missingItems.length ? ` (${recovered}/${missingItems.length} missing from the scan recovered via individual fetch; ${stillMissing} left unchanged).` : '.'),
+		`\n--price-only: refreshed ${updates.size}/${allItems.length} pool item(s) — ${priceChanges} price and ${volumeChanges} volume change(s).`,
 	);
 
 	if (notableMoves.length) {
@@ -514,22 +463,23 @@ async function main() {
 	await login();
 	const { cookieString } = getSession();
 
-	const cache = loadCache();
-
-	// --price-only is a fresh-prices request by definition, so it always re-scans stage 1
-	// rather than reusing a (possibly stale, possibly mid-write by another run) cache.
-	let candidates;
-	if (SKIP_STAGE2) {
-		console.log('Stage 1: gathering current prices (--price-only, ignoring any cached candidates)...');
-		candidates = await gatherCandidates(cookieString);
-		console.log(`Stage 1 done: ${candidates.length} candidates.`);
-		// This is the same scan a full run starts with, so keep it: a pick-items run within the TTL
-		// reuses it instead of repeating ~260 search requests.
-		cache.candidates = candidates;
-		cache.candidatesAt = new Date().toISOString();
-		saveCache(cache);
-		console.log(`Saved the candidate list to ${CACHE_FILE} for pick-items to reuse (valid ${CANDIDATES_TTL_MS / 86400000} days).`);
-		await applyStage1PricesToPool(candidates);
+	if (PRICE_ONLY) {
+		const { updates, unpriced, stopped } = await scanListings(allItems, cookieString);
+		if (updates.size) applyScanToPool(updates);
+		if (unpriced.length) {
+			console.log(`\n${unpriced.length} pool item(s) had no price on their listing page, left unchanged:`);
+			for (const name of unpriced) console.log(`  ${name}`);
+		}
+		if (stopped) {
+			console.error(`\nScan stopped early: ${stopped}.`);
+			console.error(`${updates.size}/${allItems.length} pool item(s) were refreshed. Skipping the order risk check so nothing more is sent to Steam.`);
+			process.exitCode = 1;
+			return;
+		}
+		if (unpriced.length > allItems.length * MAX_UNPRICED_SHARE) {
+			console.error(`\nMore than ${MAX_UNPRICED_SHARE * 100}% of the pool had no price — treating this run as failed.`);
+			process.exitCode = 1;
+		}
 
 		// Fresh prices just landed above, so this is the right moment to catch orders
 		// whose price has since dropped too far below their reference (see
@@ -548,6 +498,8 @@ async function main() {
 		}
 		return;
 	}
+
+	const cache = loadCache();
 
 	if (FROM_CACHE && !cache.candidates) {
 		console.error('--from-cache needs a cache with stage 1 candidates, but none was found; run without it first.');
