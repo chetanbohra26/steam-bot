@@ -467,7 +467,7 @@ async function main() {
 		const { updates, unpriced, stopped } = await scanListings(allItems, cookieString);
 		if (updates.size) applyScanToPool(updates);
 		if (unpriced.length) {
-			console.log(`\n${unpriced.length} pool item(s) had no price on their listing page, left unchanged:`);
+			console.log(`\n${unpriced.length} pool item(s) got no price this run, left unchanged:`);
 			for (const name of unpriced) console.log(`  ${name}`);
 		}
 		if (stopped) {

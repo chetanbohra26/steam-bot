@@ -14,9 +14,11 @@ const PAGE_JITTER = 0.2;
 const REQUEST_TIMEOUT_MS = 30000;
 const MAX_REDIRECTS = 3;
 const MAX_CONSECUTIVE_UNREADABLE = 3; // this many pages in a row with no prices means the page format changed
+const MAX_CONSECUTIVE_SERVER_ERRORS = 3; // this many skins in a row failing with HTTP 5xx means Steam is having trouble
 const VOLUME_WINDOW_S = 24 * 3600;
 const MAX_HISTORY_LAG_S = 6 * 3600;
-// Connection-level errors only — never an HTTP status, where calling again could extend a ban.
+// Retried: connection errors and HTTP 5xx (a one-off 500 stopped a run on 2026-11-26 and the page
+// loaded fine later). Never HTTP 429 or other 4xx, where calling again could extend a ban.
 const TRANSIENT_NETWORK_CODES = new Set(['ECONNRESET', 'ETIMEDOUT', 'ECONNABORTED', 'EPIPE', 'EAI_AGAIN', 'ERR_STREAM_PREMATURE_CLOSE']);
 const RETRY_DELAYS_MS = [10000, 30000];
 
@@ -98,7 +100,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // Fetches one listing page per skin in `items`. Never writes anything. Returns:
 //   updates  Map(market_hash_name -> { price_paise, volume }) — volume is undefined if the page had no history
-//   unpriced pool names on a fetched page with no current price (or on an unreadable page)
+//   unpriced pool names with no current price: absent from the page, or the page failed or was unreadable
 //   stopped  null, or why the scan ended early; nothing more should be sent to Steam in that case
 async function scanListings(items, cookieString, { fetchPage = fetchListingPage, wait = sleep, log = console.log } = {}) {
 	const families = new Map();
@@ -112,6 +114,7 @@ async function scanListings(items, cookieString, { fetchPage = fetchListingPage,
 	const unpriced = [];
 	let stopped = null;
 	let unreadableInARow = 0;
+	let serverErrorsInARow = 0;
 	let index = 0;
 	const startedAt = Date.now();
 	log(`Fetching ${families.size} listing page(s) for ${items.length} pool item(s), ~${PAGE_DELAY_MS / 1000}s apart...`);
@@ -121,20 +124,37 @@ async function scanListings(items, cookieString, { fetchPage = fetchListingPage,
 		const prefix = `  [${index + 1}/${families.size}] ${family}`;
 
 		let response;
-		for (let attempt = 0; !response; attempt++) {
+		for (let attempt = 0; ; attempt++) {
+			const delay = RETRY_DELAYS_MS[attempt];
+			let problem;
 			try {
 				response = await fetchPage(cookieString, members[0].market_hash_name);
+				if (response.statusCode < 500 || delay === undefined) break;
+				problem = `HTTP ${response.statusCode}`;
 			} catch (err) {
-				const delay = RETRY_DELAYS_MS[attempt];
 				if (!TRANSIENT_NETWORK_CODES.has(err.code) || delay === undefined) {
 					stopped = `request failed for ${family}: ${err.code || err.message}`;
 					break;
 				}
-				log(`${prefix} | ${err.code}; retrying in ${delay / 1000}s (retry ${attempt + 1}/${RETRY_DELAYS_MS.length})...`);
-				await wait(delay);
+				problem = err.code;
 			}
+			log(`${prefix} | ${problem}; retrying in ${delay / 1000}s (retry ${attempt + 1}/${RETRY_DELAYS_MS.length})...`);
+			await wait(delay);
 		}
 		if (stopped) break;
+
+		if (response.statusCode >= 500) {
+			serverErrorsInARow++;
+			unpriced.push(...members.map((m) => m.market_hash_name));
+			index++;
+			log(`${prefix} | HTTP ${response.statusCode} after ${RETRY_DELAYS_MS.length} retries, skipped | ${progressSuffix(startedAt, index, families.size)}`);
+			if (serverErrorsInARow >= MAX_CONSECUTIVE_SERVER_ERRORS) {
+				stopped = `${serverErrorsInARow} skins in a row failed with a server error (last HTTP ${response.statusCode})`;
+				break;
+			}
+			continue;
+		}
+		serverErrorsInARow = 0;
 
 		if (response.statusCode !== 200) {
 			stopped =
